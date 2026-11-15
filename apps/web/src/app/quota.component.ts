@@ -1,5 +1,6 @@
 import { Component, DestroyRef, computed, effect, inject, signal, untracked } from "@angular/core";
 import { DatePipe } from "@angular/common";
+import { ClaudeService } from "./claude.service";
 import { ConnectionService } from "./connection.service";
 import { quotaBuckets, quotaHeaderWindows, quotaResetDuration, quotaWindowLabel, windowRemaining, type QuotaBucket } from "./quota";
 
@@ -9,6 +10,7 @@ import { quotaBuckets, quotaHeaderWindows, quotaResetDuration, quotaWindowLabel,
 })
 export class QuotaComponent {
   readonly connection = inject(ConnectionService);
+  readonly claude = inject(ClaudeService);
   readonly buckets = signal<QuotaBucket[]>([]);
   readonly loading = signal(false);
   readonly error = signal("");
@@ -16,7 +18,7 @@ export class QuotaComponent {
   readonly headerWindows = computed(() => quotaHeaderWindows(this.buckets()));
   readonly now = signal(Date.now());
   readonly resetDuration = quotaResetDuration;
-  readonly headerLabel = computed(() => 'View Codex quota' + (this.headerWindows().length ? ': ' + this.headerWindows().map(window => `${window.label} ${window.remaining ?? 'unavailable'}${window.remaining === null ? '' : '% remaining'}`).join(', ') : ''));
+  readonly headerLabel = computed(() => 'View agent quota' + (this.headerWindows().length ? ': ' + this.headerWindows().map(window => `${window.label} ${window.remaining ?? 'unavailable'}${window.remaining === null ? '' : '% remaining'}`).join(', ') : ''));
   readonly windowRemaining = windowRemaining;
   readonly windowLabel = quotaWindowLabel;
   private revision = 0;

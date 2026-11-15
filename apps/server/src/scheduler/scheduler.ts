@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { resolve, sep } from "node:path";
 import type { ScheduleRecord } from "@codex-control/shared";
 import type { ScheduleRegistry } from "../config/schedules.js";
 import type { AppServerSupervisor } from "../codex/supervisor.js";
@@ -17,6 +18,7 @@ export interface SchedulerOptions {
   missWindowMs?: number;
   maxConcurrency?: number;
   now?: () => Date;
+  isProjectBusy?: (root: string) => boolean;
 }
 
 export interface SchedulerEvents {
@@ -33,6 +35,7 @@ export class Scheduler extends EventEmitter<SchedulerEvents> {
   private readonly missWindowMs: number;
   private readonly maxConcurrency: number;
   private readonly now: () => Date;
+  private readonly isProjectBusy?: (root: string) => boolean;
   private readonly inflight = new Map<string, Promise<void>>();
   private readonly perCwdRunning = new Map<string, number>();
   private timer: NodeJS.Timeout | null = null;
@@ -50,6 +53,7 @@ export class Scheduler extends EventEmitter<SchedulerEvents> {
     this.missWindowMs = options.missWindowMs ?? DEFAULT_MISS_WINDOW_MS;
     this.maxConcurrency = options.maxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
     this.now = options.now ?? (() => new Date());
+    this.isProjectBusy = options.isProjectBusy;
   }
 
   start(): void {
@@ -78,12 +82,20 @@ export class Scheduler extends EventEmitter<SchedulerEvents> {
       const due = this.registry.dueBy(this.now()).filter((schedule) => !this.inflight.has(schedule.id));
       for (const schedule of due) {
         if (this.inflight.size >= this.maxConcurrency) break;
-        if ((this.perCwdRunning.get(schedule.cwd) ?? 0) > 0) continue;
+        if (this.isProjectActive(schedule.cwd) || this.isProjectBusy?.(schedule.cwd)) continue;
         this.dispatch(schedule).catch((error) => this.fail(schedule, error));
       }
     } finally {
       this.running = false;
     }
+  }
+
+  isProjectActive(root: string): boolean {
+    const a = resolve(root);
+    return [...this.perCwdRunning].some(([cwd, count]) => {
+      const b = resolve(cwd);
+      return count > 0 && (a === b || a.startsWith(b + sep) || b.startsWith(a + sep));
+    });
   }
 
   private dispatch(schedule: ScheduleRecord): Promise<void> {

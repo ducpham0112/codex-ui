@@ -10,6 +10,8 @@ services:
       - "127.0.0.1:3210:3210"
     environment:
       CODEX_HOME: /home/app/.codex
+      CLAUDE_CONFIG_DIR: /home/app/.claude
+      APP_DATA_DIR: /home/app/.local/share/codex-ui
       CODEX_CWD: /workspace
       PROJECTS_ROOT: /workspace
       PROJECTS_CONFIG: /app/config/projects.yaml
@@ -26,6 +28,8 @@ services:
     volumes:
       - "${PROJECTS_ROOT}:/workspace"
       - "${HOST_CODEX_HOME:-${HOME}/.codex}:/home/app/.codex"
+      - "${HOST_CLAUDE_HOME:-${HOME}/.claude}:/home/app/.claude"
+      - "${HOST_APP_DATA:-${HOME}/.local/share/codex-ui}:/home/app/.local/share/codex-ui"
       - ./config/projects.container.yaml:/app/config/projects.yaml:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3210/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]

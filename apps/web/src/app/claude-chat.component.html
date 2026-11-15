@@ -1,0 +1,23 @@
+@if(claude.selected(); as session){
+  <header class="session-bar"><div class="session-heading"><div><h1>{{session.title}}</h1><small>Claude · {{session.model}} · {{session.status}} · {{session.projectRoot}}</small></div></div><button type="button" (click)="claude.refreshSessions()">Refresh</button></header>
+  <div class="claude-timeline" aria-label="Claude conversation" aria-live="polite">
+    @for(item of session.items; track item.id){
+      @if(item.kind==='message'){
+        <article class="claude-message" [class.user]="item.role==='user'"><b>{{item.role==='user'?'You':'Claude'}}</b><div class="markdown" [innerHTML]="markdown(item.text || '')"></div></article>
+      } @else {
+        <details class="work-card" [class.error]="item.isError"><summary>{{item.toolName || 'Tool'}} @if(item.isError){ · Failed}</summary><div class="card-detail"><pre>{{item.input | json}}</pre>@if(item.output){<pre>{{item.output}}</pre>}</div></details>
+      }
+    } @empty {<div class="empty-state"><h2>Start a Claude conversation</h2><p>Describe the work for this project.</p></div>}
+    @for(approval of session.approvals; track approval.requestKey){
+      <article class="attention-card" role="region" [attr.aria-label]="'Approve '+approval.toolName"><h2>Claude requests {{approval.toolName}}</h2>@if(approval.reason){<p>{{approval.reason}}</p>}<pre>{{approval.input | json}}</pre><div class="attention-actions"><button type="button" [disabled]="claude.busy()" (click)="claude.approve(session.id,approval.requestKey,false)">Deny</button><button class="primary-button" type="button" [disabled]="claude.busy()" (click)="claude.approve(session.id,approval.requestKey,true)">Allow once</button></div></article>
+    }
+    @if(session.error){<p role="alert">{{session.error}}</p>}
+  </div>
+  <section class="claude-composer" aria-label="Claude message composer">
+    @if(claude.error()){<p role="alert">{{claude.error()}}</p>}
+    @if(claude.pendingTurn(session.id)){<p role="status">The last message's delivery is uncertain. Retry uses the original request ID.</p><button type="button" [disabled]="claude.busy()" (click)="retry()">Retry original message</button>}
+    @if(session.status==='running' || session.status==='awaiting_approval'){<div class="running-bar"><span>Claude is {{session.status==='awaiting_approval'?'waiting for approval':'working'}}…</span><button type="button" [disabled]="claude.busy()" (click)="claude.interrupt(session.id)">Interrupt</button></div>}
+    <div class="composer-box"><textarea rows="3" aria-label="Message Claude" placeholder="Message Claude…" [ngModel]="claude.draftFor(session.id)" (ngModelChange)="claude.updateDraft(session.id,$event)" [disabled]="!!claude.pendingTurn(session.id)"></textarea><div class="composer-toolbar"><small>Text only · Agent and model stay with this session. Images, steering, and reasoning effort controls are unavailable.</small><button class="send-button" type="button" aria-label="Send to Claude" [disabled]="claude.busy() || session.status==='running' || session.status==='awaiting_approval' || !!claude.pendingTurn(session.id) || !claude.draftFor(session.id).trim() || !claude.subscriptionReady()" (click)="send()">↑</button></div></div>
+    @if(!claude.subscriptionReady()){<p role="status">Claude account is {{claude.account()?.status || 'unknown'}}. Open Settings to check the CLI account.</p>}
+  </section>
+}

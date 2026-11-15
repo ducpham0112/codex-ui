@@ -6,7 +6,8 @@
   <span class="quota-chevron" aria-hidden="true">⌄</span>
 </button>
 <section id="codex-quota-panel" popover="auto" aria-labelledby="quota-heading">
-  <header><div><h2 id="quota-heading">Codex quota</h2><small>Remaining allowance</small></div><button type="button" popovertarget="codex-quota-panel" popovertargetaction="hide" aria-label="Close quota">×</button></header>
+  <header><div><h2 id="quota-heading">Agent quota</h2><small>Remaining allowance</small></div><button type="button" popovertarget="codex-quota-panel" popovertargetaction="hide" aria-label="Close quota">×</button></header>
+  <h3>Codex</h3>
   @if(connection.state() !== 'connected') { <p class="quota-notice" role="status">Disconnected. Showing last known quota.</p> }
   @if(error()) { <p class="quota-notice" role="status">{{error()}} @if(updatedAt()){Last known values shown.}</p> }
   @if(loading()) { <p role="status">Refreshing quota…</p> }
@@ -24,5 +25,6 @@
       @if(bucket.credits; as credits) { <div class="quota-row quota-credits"><span>Credits</span><b>{{credits.unlimited ? 'Unlimited' : credits.balance !== null ? credits.balance : credits.hasCredits ? 'Available' : 'None available'}}</b></div> }
     </article>
   } @empty { @if(!loading() && !error()){<p>Quota data is unavailable for this account.</p>} }
+  <article><h3>Claude</h3><p>{{claude.usageMessage()}}</p>@if(claude.usage()?.observedLimit;as limit){<p>Last observed limit: {{limit.status || 'reported'}} · {{limit.observedAt | date:'medium'}}. @if(limit.resetsAt){Resets {{limit.resetsAt! * 1000 | date:'medium'}}}</p>}<a [href]="claude.usageUrl()" target="_blank" rel="noopener noreferrer">Open Claude usage</a><button type="button" (click)="claude.refreshStatus()" [disabled]="claude.refreshing()">Refresh Claude</button></article>
   <footer><small>{{updatedAt() ? 'Updated ' + (updatedAt() | date:'shortTime') : 'No quota snapshot yet'}}</small><button type="button" (click)="refresh()" [disabled]="loading() || connection.state() !== 'connected'">Refresh</button></footer>
 </section>

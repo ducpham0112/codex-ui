@@ -1,4 +1,5 @@
 export type JsonObject = Record<string, unknown>;
+export type { AgentId, ClaudeModel, ClaudeAccount, ClaudeUsage, ClaudeApproval, ClaudeItem, ClaudeSession, ClaudeSnapshot } from './agents.js';
 
 export interface RpcErrorShape {
   code: number;

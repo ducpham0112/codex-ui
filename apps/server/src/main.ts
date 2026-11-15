@@ -2,6 +2,9 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
+import { homedir } from "node:os";
+import { ClaudeAgent } from "./agents/claude.js";
+import { handleAgentsApi } from "./http/agents-api.js";
 import { AppServerSupervisor } from "./codex/supervisor.js";
 import { readVersionStatus } from "./system/version.js";
 import { ProjectRegistry } from "./config/projects.js";
@@ -18,7 +21,7 @@ import { parseSubscription, webPushConfig, WebPushSubscriptionStore } from "./no
 
 const host = process.env.HOST ?? "127.0.0.1";
 const port = Number(process.env.PORT ?? 3210);
-const workspaceRoot = existsSync(join(process.cwd(), "config/projects.yaml")) ? process.cwd() : join(process.cwd(), "../..");
+const workspaceRoot = existsSync(join(process.cwd(), "apps/server")) || existsSync(join(process.cwd(), "config/projects.yaml")) ? process.cwd() : join(process.cwd(), "../..");
 const supervisor = new AppServerSupervisor({ executable: process.env.CODEX_EXECUTABLE ?? "codex", args: process.env.CODEX_ARGS ? JSON.parse(process.env.CODEX_ARGS) as string[] : ["app-server", "--stdio"], cwd: process.env.CODEX_CWD ?? workspaceRoot });
 supervisor.on("stderr", (line) => { if (line) process.stderr.write(`[codex app-server] ${line}\n`); });
 const projects = await ProjectRegistry.load(process.env.PROJECTS_CONFIG ?? join(workspaceRoot, "config/projects.yaml"));
@@ -27,24 +30,25 @@ const branding = brandingFromEnvironment(process.env);
 const webPush = webPushConfig(process.env, join(workspaceRoot, "data/web-push-subscriptions.json"));
 const subscriptions = new WebPushSubscriptionStore(webPush.subscriptionsPath);
 await subscriptions.load();
-let restartingForAppServerFailure = false;
-supervisor.on("status", (status) => {
-  // A bind-mounted Unix-socket directory can be replaced by the host service
-  // after this container starts. The existing container then sees the old,
-  // empty directory forever. Once the supervisor has exhausted its bounded
-  // retries, exit so Docker's restart policy creates a fresh mount.
-  if (status.state !== "FAILED" || restartingForAppServerFailure) return;
-  restartingForAppServerFailure = true;
-  process.stderr.write(`app-server entered FAILED state; exiting for container recovery: ${status.lastError ?? "unknown error"}\n`);
-  setTimeout(() => process.exit(1), 50).unref();
-});
-await supervisor.start();
+let hub: BrowserHub;
+let scheduler: Scheduler;
+let claude: ClaudeAgent | undefined;
+try {
+  claude = await ClaudeAgent.load({
+    persistencePath: join(process.env.APP_DATA_DIR ?? join(homedir(), ".local", "share", "codex-ui"), "claude-sessions.json"),
+    projects,
+    command: process.env.CLAUDE_EXECUTABLE ?? "claude",
+    args: process.env.CLAUDE_ARGS ? JSON.parse(process.env.CLAUDE_ARGS) as string[] : [],
+    isProjectBusy: root => Boolean(hub?.isProjectActive(root) || scheduler?.isProjectActive(root))
+  });
+} catch { process.stderr.write("Claude session storage could not be loaded; Codex remains available. Check APP_DATA_DIR permissions.\n"); }
 
 const server = createServer(async (request, response) => {
   response.setHeader("x-content-type-options", "nosniff"); response.setHeader("referrer-policy", "no-referrer"); response.setHeader("x-frame-options", "DENY"); response.setHeader("content-security-policy", "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
   response.setHeader("content-type", "application/json");
   if (request.url === "/healthz") return response.end(JSON.stringify({ ok: true }));
-  if (request.url === "/readyz") { response.statusCode = supervisor.status.state === "READY" ? 200 : 503; return response.end(JSON.stringify(supervisor.status)); }
+  // Transport readiness is independent of either vendor's installation/login.
+  if (request.url === "/readyz") return response.end(JSON.stringify({ ok: true, appServer: supervisor.status, claude: claude?.snapshot().account ?? null }));
   if (request.url === "/api/system/status") return response.end(JSON.stringify({ appServer: supervisor.status, version: await readVersionStatus(), schedule: { safeRoot: schedules.safeRootPath } }));
   if (request.url === "/api/version") return response.end(JSON.stringify(await readVersionStatus()));
   if (request.url === "/api/branding") { response.setHeader("cache-control", "no-store"); return response.end(JSON.stringify(branding)); }
@@ -58,6 +62,8 @@ const server = createServer(async (request, response) => {
     } catch (error) { response.statusCode = 400; return response.end(JSON.stringify({ error: error instanceof Error ? error.message : "Invalid web push subscription" })); }
   }
   if (request.url === "/metrics") { response.setHeader("content-type", "text/plain; version=0.0.4"); return response.end(hub.metrics.render()); }
+  if (claude && await handleAgentsApi(request, response, claude, projects, process.env.PUBLIC_ORIGIN)) return;
+  if (request.url?.startsWith("/api/agents/claude")) { response.statusCode = claude ? 404 : 503; return response.end(JSON.stringify({ error: { code: claude ? "NOT_FOUND" : "CLAUDE_UNAVAILABLE", message: claude ? "Unknown Claude operation" : "Claude session storage is unavailable. Check APP_DATA_DIR permissions." } })); }
   if (await handleModelPresetsApi(request, response)) return;
   if (await handleProjectsApi(request, response, projects, process.env.PUBLIC_ORIGIN, () => hub.projectsChanged())) return;
   if (await handleSessionsApi(request, response, hub, process.env.PUBLIC_ORIGIN)) return;
@@ -72,8 +78,9 @@ const server = createServer(async (request, response) => {
   response.statusCode = 404; response.end(JSON.stringify({ error: "Not found" }));
 });
 const dispatcher = webPush.enabled ? new NotificationDispatcher(webPush, subscriptions, branding.shortName) : undefined;
-const hub = new BrowserHub(server, supervisor, projects, undefined, process.env.PUBLIC_ORIGIN, 10_000, dispatcher);
-const scheduler = new Scheduler({ registry: schedules, supervisor, broadcast: (schedule) => hub.broadcastScheduleChange(schedule) });
+hub = new BrowserHub(server, supervisor, projects, undefined, process.env.PUBLIC_ORIGIN, 10_000, dispatcher, root => Boolean(claude?.isProjectActive(root) || scheduler?.isProjectActive(root)));
+scheduler = new Scheduler({ registry: schedules, supervisor, broadcast: (schedule) => hub.broadcastScheduleChange(schedule), isProjectBusy: root => Boolean(hub.isProjectActive(root) || claude?.isProjectActive(root)) });
+void supervisor.start().catch(() => process.stderr.write("Codex app-server is unavailable; the app and Claude remain accessible.\n"));
 scheduler.start();
 const projectRefresh = setInterval(() => {
   void projects.refreshDiscovered().then((changed) => {
@@ -81,7 +88,7 @@ const projectRefresh = setInterval(() => {
   }).catch((error) => process.stderr.write(`project discovery refresh failed: ${error instanceof Error ? error.message : String(error)}\n`));
 }, 5_000);
 server.listen(port, host, () => process.stdout.write(`codex-control server listening on http://${host}:${port}\n`));
-const shutdown = async () => { clearInterval(projectRefresh); await scheduler.stop(); hub.close(); server.close(); await supervisor.stop(); };
+const shutdown = async () => { clearInterval(projectRefresh); await scheduler.stop(); hub.close(); server.close(); await Promise.allSettled([supervisor.stop(), claude?.close()]); };
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
 

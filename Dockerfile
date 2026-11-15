@@ -24,16 +24,17 @@ RUN pnpm build && \
 FROM node:20-bookworm-slim AS runtime
 
 ARG CODEX_VERSION=0.164.0
+ARG CLAUDE_VERSION=2.1.325
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends ca-certificates curl bubblewrap && \
     update-ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    npm install --global "@openai/codex@${CODEX_VERSION}" && \
+    npm install --global "@openai/codex@${CODEX_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_VERSION}" && \
     npm cache clean --force && \
     groupadd --gid 10001 app && \
     useradd --uid 10001 --gid app --create-home --shell /usr/sbin/nologin app && \
-    mkdir -p /app/apps/web/dist /app/config /home/app/.codex /workspace && \
-    chown -R app:app /app /home/app/.codex /workspace
+    mkdir -p /app/apps/web/dist /app/config /home/app/.codex /home/app/.claude /home/app/.local/share/codex-ui /workspace && \
+    chown -R app:app /app /home/app/.codex /home/app/.claude /home/app/.local /workspace
 
 WORKDIR /app
 COPY --from=builder --chown=app:app /runtime/ /app/server/
@@ -54,6 +55,8 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3210 \
     CODEX_HOME=/home/app/.codex \
+    CLAUDE_CONFIG_DIR=/home/app/.claude \
+    APP_DATA_DIR=/home/app/.local/share/codex-ui \
     SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
     CODEX_CWD=/workspace \

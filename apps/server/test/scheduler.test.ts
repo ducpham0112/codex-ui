@@ -35,6 +35,20 @@ async function makeRegistry(injectedNow: () => Date): Promise<ScheduleRegistry> 
 async function flushMicrotasks(): Promise<void> { for (let i = 0; i < 10; i++) await Promise.resolve(); }
 
 describe("Scheduler with cron", () => {
+  it("defers a due schedule while another agent is writing the project", async () => {
+    const now = { value: new Date(2_000_000) };
+    const registry = await makeRegistry(() => now.value);
+    const supervisor = makeSupervisor();
+    const scheduler = new Scheduler({ registry, supervisor, broadcast: () => undefined, isProjectBusy: () => true, now: () => now.value });
+    schedulers.push(scheduler);
+    scheduler.start();
+    await registry.create({ cwd: registry.safeRootPath + "/alpha", prompt: "Hi", cron: "* * * * *" });
+    now.value = new Date(now.value.getTime() + 60_000);
+    await scheduler.tick();
+    await flushMicrotasks();
+    expect(supervisor.broker.request).not.toHaveBeenCalled();
+    expect(registry.list()[0].status).toBe("pending");
+  });
   it("runs due schedules through the broker and advances nextRunAt after success", async () => {
     const now = { value: new Date(2_000_000) };
     const advance = (ms: number) => { now.value = new Date(now.value.getTime() + ms); };

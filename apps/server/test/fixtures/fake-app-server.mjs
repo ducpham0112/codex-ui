@@ -63,6 +63,10 @@ rl.on("line", (line) => {
     return;
   }
   if (message.method === "thread/list") return reply({ id: message.id, result: { data: [{ ...seededThread, turns: [] }, approvalThread, terminalApprovalThread, parentWorkspaceThread, longTitleThread], nextCursor: null } });
+  if (message.method === "thread/read") {
+    const thread = createdThreads.get(message.params.threadId) ?? [seededThread, approvalThread, terminalApprovalThread, parentWorkspaceThread, longTitleThread].find(thread => thread.id === message.params.threadId);
+    return thread ? reply({ id: message.id, result: { thread } }) : reply({ id: message.id, error: { code: -32000, message: "Unknown thread" } });
+  }
   if (message.method === "thread/resume") {
     const thread = message.params.threadId === approvalThread.id ? approvalThread : message.params.threadId === terminalApprovalThread.id ? terminalApprovalThread : message.params.threadId === longTitleThread.id ? longTitleThread : createdThreads.get(message.params.threadId) ?? seededThread;
     if (message.params.model === "Unavailable") return reply({ id: message.id, error: { code: -32000, message: "Selected provider is unavailable" } });

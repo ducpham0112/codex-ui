@@ -1,4 +1,8 @@
 import { AfterViewInit, Component, ElementRef, HostListener, OnDestroy, OnInit, ViewChild, computed, effect, inject, signal } from "@angular/core";
+import { ClaudeService, CLAUDE_MODELS, mergedAgentSessions, type AgentFilter } from "./claude.service";
+import { ClaudeChatComponent } from "./claude-chat.component";
+import { AgentSettingsComponent } from "./agent-settings.component";
+import type { AgentId, ClaudeModel } from "../../../../packages/shared/src/agents";
 import { FormsModule } from "@angular/forms";
 import { CommonModule } from "@angular/common";
 import { ConnectionService } from "./connection.service";
@@ -35,7 +39,7 @@ interface CodexLogin { loginId: string; verificationUrl: string; userCode: strin
 type ComposerInput = { type: "text"; text: string; text_elements: []; } | { type: "image"; url: string; };
 const PROJECT_SETUP_PROMPT = "Initialize this project by creating a README.md that explains the project purpose, initial structure, and getting-started instructions. Do not create unrelated files.";
 
-@Component({ selector: "codex-root", standalone: true, imports: [CommonModule, FormsModule, ScheduleComponent, QuotaComponent], templateUrl: "./app.component.html" })
+@Component({ selector: "codex-root", standalone: true, imports: [CommonModule, FormsModule, ScheduleComponent, QuotaComponent, ClaudeChatComponent, AgentSettingsComponent], templateUrl: "./app.component.html" })
 export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   private static readonly SESSION_POLL_MS = 15_000;
   @ViewChild("shell") shell?: ElementRef<HTMLElement>;
@@ -70,6 +74,13 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   readonly history = inject(ThreadHistoryStore);
   readonly updater = inject(UpdateService);
   readonly brand = inject(BRANDING);
+  readonly claude = inject(ClaudeService);
+  readonly agentFilter = signal<AgentFilter>('all');
+  readonly newThreadAgent = signal<AgentId>('codex');
+  readonly newClaudeModel = signal<ClaudeModel>(this.claude.defaultModel());
+  readonly claudeModels = CLAUDE_MODELS;
+  readonly sessionEntries = computed(() => mergedAgentSessions(this.threads(), this.claude.sessions(), this.projectId(), this.agentFilter()));
+  readonly selectedSession = computed(() => this.claude.selected() ? this.sessionEntries().find(entry => entry.agentId === 'claude' && entry.nativeId === this.claude.selectedId()) ?? {...this.claude.selected(), name:this.claude.selected()?.title, cwd:this.claude.selected()?.projectRoot, id:'claude:'+this.claude.selectedId(),agentId:'claude'} : this.selectedThread());
   readonly threads = signal<any[]>([]);
   readonly selectedThread = signal<any>(null);
   readonly optimisticMessages = signal<OptimisticMessage[]>([]);
@@ -87,6 +98,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   readonly dismissedApprovalKey = signal<string | null>(null);
   readonly authDialogDismissed = signal(false);
   readonly codexLoginDismissed = signal(false);
+  readonly codexAccountDialog = signal(false);
   readonly codexLoginRequired = signal(false);
   readonly codexLogin = signal<CodexLogin | null>(null);
   readonly codexLoginError = signal("");
@@ -138,7 +150,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   readonly projectLastUsed = signal<Record<string, number>>(this.loadProjectLastUsed());
   readonly projects = computed(() => (this.connection.snapshot()?.projects ?? []).map((project: any) => ({ ...project, recentAt: this.projectLastUsed()[project.id] ?? 0 })));
   readonly filteredProjects = computed(() => filterProjects(this.projects(), this.selectorQuery()));
-  readonly filteredThreads = computed(() => { const query = this.selectorQuery().trim().toLocaleLowerCase(); return this.threads().filter((thread) => !query || this.formatThread(thread).toLocaleLowerCase().includes(query)); });
+  readonly filteredThreads = computed(() => { const query = this.selectorQuery().trim().toLocaleLowerCase(); return this.sessionEntries().filter((thread) => !query || this.formatThread(thread).toLocaleLowerCase().includes(query)); });
   readonly groupedThreads = computed(() => groupSessions(this.filteredThreads(), this.includeArchived()));
   readonly hasArchivedThreads = computed(() => groupSessions(this.filteredThreads(), true).some((group) => group.name === "Archived"));
   readonly canLoadMoreSessions = computed(() => Boolean(this.sessionNextCursor()) && !this.sessionLoadingMore());
@@ -186,6 +198,15 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   });
 
   constructor() {
+    effect(() => {
+      const sessions = this.claude.sessions();
+      const scope = this.projectId();
+      const remembered = localStorage.getItem(`agents.selected.${scope}`);
+      if (!this.selectedThread() && !this.claude.selectedId() && remembered?.startsWith('claude:')) {
+        const session = sessions.find(item => 'claude:'+item.id === remembered && (scope === ALL_SESSIONS_ID || item.projectId === scope));
+        if(session) this.claude.select(session.id);
+      }
+    });
     effect(() => {
       const id = this.projectId();
       const projects = this.projects();
@@ -275,6 +296,8 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
 
   enableNotifications(): void { void this.notifications.enable().catch(() => undefined); }
 
+  openCodexAccountLogin(): void { this.codexAccountDialog.set(true); this.codexLoginDismissed.set(false); }
+  async logoutCodex(): Promise<void> { try { await this.connection.rpc('account/logout'); await this.refreshCodexAccount(); } catch(error) { this.showError(error); } }
   async startCodexLogin(): Promise<void> {
     if (this.codexLogin()) return;
     this.codexLoginError.set("");
@@ -302,7 +325,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   }
 
   ngAfterViewInit() { this.observeLayout(); this.scheduleScroll(false, true); this.sessionPollTimer = window.setInterval(() => void this.refreshRecentSessions(), AppComponent.SESSION_POLL_MS); }
-  ngOnInit() { this.initTouchDeviceDetection(); }
+  ngOnInit() { this.initTouchDeviceDetection(); this.claude.start(); }
   ngOnDestroy() { this.composerResizeObserver?.disconnect(); this.timelineResizeObserver?.disconnect(); this.navResizeObserver?.disconnect(); this.sentinelObserver?.disconnect(); if (this.visualViewportListener) { visualViewport?.removeEventListener("resize", this.visualViewportListener); visualViewport?.removeEventListener("scroll", this.visualViewportListener); } if (this.sessionPollTimer) clearInterval(this.sessionPollTimer); cancelAnimationFrame(this.scrollFrame); removeEventListener("pointermove", this.onPullMove); removeEventListener("pointerup", this.onPullEnd); removeEventListener("pointercancel", this.onPullEnd); if (this.touchDeviceMedia && this.touchDeviceListener) { this.touchDeviceMedia.removeEventListener("change", this.touchDeviceListener); this.touchDeviceListener = undefined; this.touchDeviceMedia = null; } }
   private initTouchDeviceDetection() {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
@@ -313,7 +336,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
     this.touchDeviceListener = (event: MediaQueryListEvent) => this.isTouchDevice.set(event.matches);
     media.addEventListener("change", this.touchDeviceListener);
   }
-  private async refreshCodexAccount(): Promise<void> {
+  async refreshCodexAccount(): Promise<void> {
     if (this.accountCheckInFlight) return;
     this.accountCheckInFlight = true;
     try {
@@ -325,15 +348,17 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
       this.accountCheckInFlight = false;
     }
   }
-  selectTab(tab: PrimaryTab) { this.tab.set(tab); localStorage.setItem("codex.tab", tab); if (tab === "chat") { this.scheduleScroll(false); this.updateNearBottom(); } }
+  selectTab(tab: PrimaryTab) { this.tab.set(tab); if(tab === "settings" && this.connection.canSend()) void this.loadModelOptions(); localStorage.setItem("codex.tab", tab); if (tab === "chat") { this.scheduleScroll(false); this.updateNearBottom(); } }
 
   selectProject(id: string) {
     this.recordProjectUse(id);
     this.saveScrollPosition(); this.projectId.set(id); localStorage.setItem("codex.sessionScope", id);
-    this.selectedThread.set(null); this.threads.set([]); this.sessionNextCursor.set(null); this.loadedProjectId = ""; this.clearUnseenUpdates();
+    this.claude.selectedId.set(null); this.selectedThread.set(null); this.threads.set([]); this.sessionNextCursor.set(null); this.loadedProjectId = ""; this.clearUnseenUpdates();
   }
 
   async refreshThreads(scannedThreads: any[] = []) {
+    void this.claude.refreshSessions();
+    if(!this.connection.canSend()) return;
     const requestedProjectId = this.projectId();
     const project = this.selectedProject();
     if (requestedProjectId !== ALL_SESSIONS_ID && !project) return;
@@ -367,7 +392,8 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
         }
       }
       selected = selected ?? this.threads()[0];
-      if (selected) await this.selectThread(selected);
+      const selectedAgent = localStorage.getItem(`agents.selected.${requestedProjectId}`);
+      if (selected && !this.claude.selectedId() && !selectedAgent?.startsWith('claude:')) await this.selectThread(selected);
     } catch (error) {
       if (this.projectId() === requestedProjectId) {
         this.loadedProjectId = "";
@@ -526,6 +552,13 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
 
   async selectThread(thread: any, startedRuntime?: any) {
     if (!thread) return;
+    if(thread.agentId === 'claude') {
+      this.saveScrollPosition(); this.selectedThread.set(null); this.claude.select(thread.nativeId ?? thread.id.replace(/^claude:/,''));
+      localStorage.setItem(`agents.selected.${this.projectId()}`, 'claude:'+(thread.nativeId ?? thread.id.replace(/^claude:/,'')));
+      this.error.set(''); this.sessionMenuOpen.set(false); return;
+    }
+    this.claude.selectedId.set(null);
+    localStorage.setItem(`agents.selected.${this.projectId()}`, thread.id);
     const restoreSavedPosition = this.visitedThreadIds.has(thread.id);
     const selectionScrollInteraction = this.scrollInteraction;
     this.saveScrollPosition(); this.selectedThread.set(thread); this.currentModel.set(null); this.composerModelKey.set(""); this.historyLimit.set(160); this.lastVisibleCount = 0; this.clearUnseenUpdates();
@@ -557,7 +590,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
     this.restoreScrollPosition(thread.id, restoreSavedPosition, selectionScrollInteraction);
   }
 
-  selectThreadById(id: string) { const thread = this.threads().find((item) => item.id === id); if (thread) void this.selectThread(thread); }
+  selectThreadById(id: string) { const thread = this.sessionEntries().find((item) => item.id === id); if (thread) void this.selectThread(thread); }
   openSelector(kind: "project" | "session") { if (this.selectorOpen()) return; this.selectorQuery.set(""); this.selectorActiveIndex.set(0); this.selectorOpen.set(kind); requestAnimationFrame(() => document.querySelector<HTMLInputElement>(".selector-dialog input")?.focus()); }
   closeSelector(restoreFocus = true) { const kind = this.selectorOpen(); this.selectorOpen.set(null); this.selectorQuery.set(""); if (restoreFocus) requestAnimationFrame(() => (kind === "project" ? this.projectTrigger : this.sessionTrigger)?.nativeElement.focus()); }
   chooseProject(id: string) { this.selectProject(id); this.closeSelector(); }
@@ -584,7 +617,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   openNewThreadDialog() {
     this.createMenuOpen.set(false);
     if (!this.canCreateThread()) { this.error.set("Select a project before creating a new session."); return; }
-    this.newThreadModelKey.set(""); this.newThreadDialogOpen.set(true); void this.loadModelOptions();
+    this.newThreadAgent.set(this.claude.defaultAgent()); this.newClaudeModel.set(this.claude.defaultModel()); this.newThreadModelKey.set(localStorage.getItem("codex.defaultModelPair") ?? ""); this.newThreadDialogOpen.set(true); if(this.connection.canSend()) void this.loadModelOptions();
   }
   closeNewThreadDialog() { if (!this.newThreadCreating()) this.newThreadDialogOpen.set(false); }
   selectNewThreadModel(value: string) {
@@ -593,6 +626,14 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   }
   async confirmNewThread() {
     if (this.newThreadCreating()) return;
+    this.claude.setDefaultAgent(this.newThreadAgent());
+    if(this.newThreadAgent() === 'claude') {
+      const project = this.selectedProject(); if(!project) return;
+      this.newThreadCreating.set(true);
+      try { const session = await this.claude.createSession(project.id, this.newClaudeModel()); if(session) { await this.selectThread({agentId:'claude',nativeId:session.id}); this.newThreadDialogOpen.set(false); } }
+      finally { this.newThreadCreating.set(false); }
+      return;
+    }
     const key = this.newThreadModelKey();
     const pair = key ? this.modelOptions().find((option) => option.key === key) : undefined;
     if (key && !pair) { this.error.set("The selected model is no longer available."); return; }
@@ -731,8 +772,9 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   persistSetting(key: string, value: string) { localStorage.setItem(`codex.${key}`, value); }
   applyUpdate() { void this.updater.applyUpdate(); }
   dismissUpdate() { this.updater.dismiss(); }
-  formatThread(thread: any) { return sessionTitle({ ...thread, firstPrompt: this.firstPrompt(thread) }); }
+  formatThread(thread: any) { if(thread?.agentId === "claude") return thread.title || thread.name || "Untitled Claude session"; return sessionTitle({ ...thread, firstPrompt: this.firstPrompt(thread) }); }
   threadLocation(thread: any) { return sessionLocation(this.projects(), thread); }
+  agentLabel(thread: any) { return thread?.agentId === "claude" ? "Claude" : "Codex"; }
   threadStatus(thread: any) { if (thread?.externalWriter) return "Open elsewhere"; const status = thread?.status?.type ?? thread?.status ?? "idle"; return status === "inProgress" ? "Running" : status.charAt(0).toUpperCase() + status.slice(1); }
   markdown(value: string) { return renderMarkdown(value); }
   commandSummary(item: ChatItem) { if (item.status === "inProgress") return "Running…"; if (item.meta?.exitCode && item.meta.exitCode !== 0) return `Failed · exit code ${item.meta.exitCode}`; return [item.status === "completed" ? "Completed" : item.status, item.meta?.duration].filter(Boolean).join(" · ") || "View result"; }
@@ -824,6 +866,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
     if (this.selectedThread()?.id === threadId) this.selectedThread.set(cachedThread(base, local));
   }
   threadModelLabel(thread: any): string {
+    if(thread?.agentId === "claude") return thread.model || "default";
     const pair = this.threadModels()[thread?.id];
     if (!pair) return "";
     return pair.modelProvider && pair.modelProvider !== "openai"

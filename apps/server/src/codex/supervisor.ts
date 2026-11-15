@@ -36,6 +36,8 @@ export class AppServerSupervisor extends EventEmitter<SupervisorEvents> {
   }
 
   get status(): SupervisorStatus { return { ...this.statusValue }; }
+  /** A proxy transports a remote writer whose lifetime is not this child's. */
+  get managesLocalExecution(): boolean { return this.options.transport !== "websocket"; }
   get broker(): RpcBroker { if (!this.brokerValue) throw new Error("App-server is not running"); return this.brokerValue; }
 
   async start(): Promise<void> {
