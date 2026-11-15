@@ -9,6 +9,7 @@
   <header class="app-header">
     <div class="brand"><span class="logo" aria-hidden="true"><img [src]="brand.iconUrl" alt=""></span><strong>{{brand.shortName}}</strong></div>
     <div class="header-actions">
+      <codex-quota />
       <span class="connection" [class.online]="connection.state()==='connected'"><i></i><span>{{connection.state()==='connected'?'Connected':connection.state()==='connecting'?'Connecting':'Disconnected'}}</span></span>
     </div>
   </header>

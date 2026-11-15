@@ -18,14 +18,41 @@ const configKeyAllowlist = ["model", "model_reasoning_effort", "model_reasoning_
 const MAX_BROWSER_WS_PAYLOAD_BYTES = 2 * 1024 * 1024;
 
 export class BrowserHub {
+  private readonly heartbeat: ReturnType<typeof setInterval>;
   private readonly wss: WebSocketServer; private readonly stream: EventStream; private readonly pending = new Map<string, { id: number | string; method: string; params: unknown }>(); private readonly attention = new AttentionCoordinator(); private readonly observedThreads = new Map<string, unknown>();
   constructor(server: Server, private readonly supervisor: AppServerSupervisor, private readonly projects: ProjectRegistry, readonly metrics = new Metrics(), origin?: string, capacity = 10_000, private readonly dispatcher?: NotificationDispatcher) {
     this.stream = new EventStream(capacity); this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BROWSER_WS_PAYLOAD_BYTES });
+    // Keep idle proxies/tunnels active even when browsers throttle background
+    // timers. This is transport traffic, so it does not enter event replay.
+    this.heartbeat = setInterval(() => this.broadcast({ type: "system.heartbeat" }), 25_000);
+    this.heartbeat.unref();
     server.on("upgrade", (request, socket, head) => {
-      if (request.url !== "/ws" || (origin && request.headers.origin !== origin)) return socket.destroy();
+      const pathMatches = request.url === "/ws";
+      const originMatches = !origin || request.headers.origin === origin;
+      this.logConnection("upgrade", { pathMatches, originMatches });
+      if (!pathMatches || !originMatches) {
+        this.logConnection("upgrade_rejected", { reason: !pathMatches ? "path_mismatch" : "origin_mismatch" });
+        return socket.destroy();
+      }
       this.wss.handleUpgrade(request, socket, head, (client) => this.wss.emit("connection", client, request));
     });
-    this.wss.on("connection", (client, _request: IncomingMessage) => { this.metrics.clients++; client.on("error", (error: NodeJS.ErrnoException) => { console.warn(`[websocket] client closed after ${error.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH" ? "an oversized message" : "a transport error"}`); }); client.once("close", () => { this.metrics.clients--; }); client.on("message", (data) => void this.receive(client, data.toString())); });
+    this.wss.on("connection", (client, request: IncomingMessage) => {
+      const connectionId = randomUUID();
+      const startedAt = Date.now();
+      let lastMessageAt = startedAt;
+      this.metrics.clients++;
+      const rayHeader = request.headers["cf-ray"];
+      const rayId = typeof rayHeader === "string" && /^[a-zA-Z0-9-]{1,80}$/.test(rayHeader) ? rayHeader : null;
+      this.logConnection("connected", { connectionId, clients: this.metrics.clients, rayId });
+      client.on("error", (error: NodeJS.ErrnoException) => {
+        this.logConnection("transport_error", { connectionId, oversized: error.code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH" });
+      });
+      client.once("close", (code) => {
+        this.metrics.clients--;
+        this.logConnection("closed", { connectionId, code, lifetimeMs: Date.now() - startedAt, lastMessageAgeMs: Date.now() - lastMessageAt, clients: this.metrics.clients });
+      });
+      client.on("message", (data) => { lastMessageAt = Date.now(); void this.receive(client, data.toString()); });
+    });
     supervisor.on("notification", (method, params) => {
       this.metrics.notifications++;
       if (method === "thread/started") this.rememberThread((params as any)?.thread);
@@ -41,9 +68,15 @@ export class BrowserHub {
       if (item) this.broadcast(this.stream.append("attention.changed", { item, counts: this.attention.counts() }));
     });
     supervisor.on("serverRequest", (id, method, params) => { const requestKey = randomUUID(); this.pending.set(requestKey, { id, method, params }); const item = this.attention.add(method, params, requestKey); this.broadcast(this.stream.append("codex.serverRequest", { requestKey, method, params, expiresAt: null })); if (item) { this.broadcast(this.stream.append("attention.changed", { item, counts: this.attention.counts() })); if (shouldDispatchWebPush(item)) this.dispatch(item); } });
-    supervisor.on("status", (status) => this.broadcast(this.stream.append("system.status", { status })));
+    supervisor.on("status", (status) => {
+      this.logConnection("app_server_status", { state: status.state, restartCount: status.restartCount });
+      this.broadcast(this.stream.append("system.status", { status }));
+    });
   }
-  close(): void { this.wss.close(); }
+  private logConnection(event: string, details: Record<string, string | number | boolean | null>): void {
+    console.info("[websocket]", JSON.stringify({ at: new Date().toISOString(), event, ...details }));
+  }
+  close(): void { this.logConnection("hub_closing", { clients: this.metrics.clients }); clearInterval(this.heartbeat); this.wss.close(); }
   projectsChanged(): void { this.broadcast(this.snapshot()); }
   broadcastScheduleChange(schedule: ScheduleRecord): void { this.broadcast(this.stream.append("schedule.changed", { schedule })); }
   /**

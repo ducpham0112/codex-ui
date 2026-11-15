@@ -22,6 +22,7 @@ const installFetchStub = (responder: (input: RequestInfo | URL, init?: RequestIn
 const installWebSocketStub = () => {
   const original = (globalThis as any).WebSocket;
   class StubWebSocket {
+    static CONNECTING = 0;
     static OPEN = 1;
     static CLOSED = 3;
     readyState = 1;
@@ -37,6 +38,18 @@ const installWebSocketStub = () => {
 };
 
 describe("ConnectionService.authRequired", () => {
+  it("persists bounded connection diagnostics without recording message payloads", () => {
+    localStorage.removeItem("codex.connectionLog");
+    const service = new ConnectionService({ accept() {} } as any);
+    const socket = (service as any).socket;
+    socket.onopen();
+    socket.onclose({ code: 1006, wasClean: false, reason: "secret-cookie-value" });
+    const records = JSON.parse(localStorage.getItem("codex.connectionLog") ?? "[]");
+    expect(records.some((record: any) => record.event === "closed" && record.code === 1006 && record.wasClean === false)).toBe(true);
+    expect(JSON.stringify(records)).not.toContain("secret-cookie-value");
+    for (let index = 0; index < 160; index++) (service as any).logConnection("retry", { delayMs: 500 });
+    expect(JSON.parse(localStorage.getItem("codex.connectionLog")!).length).toBe(150);
+  });
   beforeEach(() => {
     installWebSocketStub();
     if (!("localStorage" in globalThis) || !globalThis.localStorage) {
@@ -172,5 +185,27 @@ describe("ConnectionService.authRequired", () => {
     (service as any).state.set("connected");
     (service as any).authRequired.set(false);
     expect(service.authRequired()).toBe(false);
+  });
+
+  it("replaces a silent open socket after idle instead of trusting readyState", () => {
+    const service = new ConnectionService({ accept() {} } as any);
+    const socket = (service as any).socket;
+    socket.onopen();
+    expect(service.state()).toBe("connected");
+    vi.advanceTimersByTime(75_000);
+    expect((service as any).socket).not.toBe(socket);
+    expect(service.state()).toBe("connecting");
+  });
+
+  it("keeps a healthy idle connection while server heartbeats arrive", () => {
+    const service = new ConnectionService({ accept() {} } as any);
+    const socket = (service as any).socket;
+    socket.onopen();
+    for (let index = 0; index < 6; index++) {
+      vi.advanceTimersByTime(25_000);
+      socket.onmessage({ data: JSON.stringify({ type: "system.heartbeat" }) });
+    }
+    expect((service as any).socket).toBe(socket);
+    expect(service.state()).toBe("connected");
   });
 });

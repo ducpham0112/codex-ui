@@ -14,6 +14,7 @@ import { approvalResult, supportsSessionApproval as canApproveForSession, type A
 import { filterProjects, groupSessions, projectLabel, sessionTitle } from "./selector-utils";
 import { configureNewTabLink } from "./external-links";
 import { ScheduleComponent } from "./schedule.component";
+import { QuotaComponent } from "./quota.component";
 import { belongsToThread, mergeResumedThread } from "./thread-events";
 import { modelPairKey } from "./model-pair";
 import { clipboardImageFiles, imageFiles, readImageDataUrl } from "./clipboard-image";
@@ -34,7 +35,7 @@ interface CodexLogin { loginId: string; verificationUrl: string; userCode: strin
 type ComposerInput = { type: "text"; text: string; text_elements: []; } | { type: "image"; url: string; };
 const PROJECT_SETUP_PROMPT = "Initialize this project by creating a README.md that explains the project purpose, initial structure, and getting-started instructions. Do not create unrelated files.";
 
-@Component({ selector: "codex-root", standalone: true, imports: [CommonModule, FormsModule, ScheduleComponent], templateUrl: "./app.component.html" })
+@Component({ selector: "codex-root", standalone: true, imports: [CommonModule, FormsModule, ScheduleComponent, QuotaComponent], templateUrl: "./app.component.html" })
 export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   private static readonly SESSION_POLL_MS = 15_000;
   @ViewChild("shell") shell?: ElementRef<HTMLElement>;

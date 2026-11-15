@@ -13,17 +13,24 @@ export class ConnectionService {
   private socket?: WebSocket; private retry = 500; private generation?: string; private sequence = 0;
   private authProbeTimer?: number;
   private authProbeInflight = false;
+  private lastMessageAt = 0;
+  private watchdogTimer?: number;
+  private reconnectTimer?: number;
   private readonly clientId = localStorage.getItem("codex.clientId") ?? createId();
   constructor(private readonly timeline: TimelineStore, private readonly notifications?: NotificationService) {
     localStorage.setItem("codex.clientId", this.clientId);
     this.installGatewayFetchGuard();
     void this.notifications?.initialize();
+    this.logConnection("initialized");
     this.connect();
-    addEventListener("online", () => { this.authRequired.set(false); this.connect(); });
-    addEventListener("offline", () => { this.state.set("disconnected"); this.socket?.close(); });
+    addEventListener("online", () => { this.logConnection("online"); void this.forceReconnect(); });
+    addEventListener("offline", () => { this.logConnection("offline"); this.state.set("disconnected"); this.socket?.close(); });
     addEventListener("visibilitychange", () => {
+      this.logConnection("visibility_changed", { lastMessageAgeMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null });
       if (document.visibilityState === "visible") {
-        if (this.socket?.readyState !== WebSocket.OPEN) {
+        if (this.socket?.readyState === WebSocket.OPEN && Date.now() - this.lastMessageAt > 60_000) {
+          void this.forceReconnect();
+        } else if (this.socket?.readyState !== WebSocket.OPEN) {
           this.authRequired.set(false);
           this.connect();
         }
@@ -61,10 +68,13 @@ export class ConnectionService {
     return Array.isArray(body?.presets) ? body.presets : [];
   }
   async forceReconnect(): Promise<void> {
+    this.logConnection("force_reconnect", { readyState: this.socket?.readyState ?? null });
+    this.stopWatchdog();
+    if (this.reconnectTimer !== undefined) { clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
     if (!navigator.onLine) { this.state.set("disconnected"); return; }
     const previous = this.socket;
-    if (previous && previous.readyState !== WebSocket.CLOSED) previous.close();
     if (previous) { previous.onopen = null; previous.onmessage = null; previous.onclose = null; previous.onerror = null; }
+    if (previous && previous.readyState !== WebSocket.CLOSED) previous.close();
     this.socket = undefined;
     this.retry = 500;
     this.authRequired.set(false);
@@ -84,8 +94,10 @@ export class ConnectionService {
     this.authProbeInflight = true;
     try {
       const response = await fetch("/api/version", { method: "GET", redirect: "manual", cache: "no-store", credentials: "same-origin" });
+      this.logConnection("auth_probe_result", { status: response.status, redirected: response.redirected, responseType: response.type });
       return this.observeGatewayResponse(response);
     } catch {
+      this.logConnection("auth_probe_network_error");
       // Network errors are transient and must not be reported as auth failures.
       return false;
     } finally { this.authProbeInflight = false; }
@@ -97,6 +109,7 @@ export class ConnectionService {
   observeGatewayResponse(response: Pick<Response, "status" | "type" | "redirected">): boolean {
     // `redirect: "manual"` exposes a 3xx as status 0/type "opaqueredirect".
     if (response.type !== "opaqueredirect" && !response.redirected && response.status !== 401 && response.status !== 403) return false;
+    this.logConnection("auth_required", { status: response.status, responseType: response.type });
     this.authRequired.set(true);
     return true;
   }
@@ -147,25 +160,52 @@ export class ConnectionService {
   private connect(): void {
     if (!navigator.onLine) { this.state.set("disconnected"); return; }
     if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
+    if (this.reconnectTimer !== undefined) { clearTimeout(this.reconnectTimer); this.reconnectTimer = undefined; }
+    this.logConnection("connect_attempt");
     this.state.set("connecting");
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     this.socket = new WebSocket(`${protocol}//${location.host}/ws`);
+    const attemptStartedAt = Date.now();
     this.socket.onopen = () => {
+      this.logConnection("opened", { handshakeMs: Date.now() - attemptStartedAt });
+      this.lastMessageAt = Date.now();
+      this.stopWatchdog();
+      this.watchdogTimer = window.setInterval(() => {
+        if (Date.now() - this.lastMessageAt > 60_000) {
+          this.logConnection("heartbeat_timeout", { lastMessageAgeMs: Date.now() - this.lastMessageAt });
+          void this.forceReconnect();
+        }
+      }, 15_000);
       this.state.set("connected");
       this.retry = 500;
       if (this.authProbeTimer !== undefined) { clearTimeout(this.authProbeTimer); this.authProbeTimer = undefined; }
       this.authRequired.set(false);
       this.send({ type: "hello", clientId: this.clientId, lastGenerationId: this.generation, lastSequence: this.sequence });
     };
-    this.socket.onmessage = ({ data }) => this.accept(JSON.parse(data));
-    this.socket.onclose = () => {
+    this.socket.onmessage = ({ data }) => { this.lastMessageAt = Date.now(); this.accept(JSON.parse(data)); };
+    this.socket.onerror = () => this.logConnection("socket_error", { readyState: this.socket?.readyState ?? null });
+    this.socket.onclose = (event) => {
+      this.logConnection("closed", { code: event?.code ?? null, wasClean: event?.wasClean ?? null, lifetimeMs: Date.now() - attemptStartedAt, lastMessageAgeMs: this.lastMessageAt ? Date.now() - this.lastMessageAt : null, retryMs: this.retry });
+      this.stopWatchdog();
       this.state.set("disconnected");
       // Defer auth probing until a real handshake has succeeded at least once,
       // otherwise the very first WS upgrade can race the gateway's auth check.
       if (this.generation) this.scheduleAuthProbe();
-      setTimeout(() => this.connect(), this.retry);
+      this.reconnectTimer = window.setTimeout(() => { this.reconnectTimer = undefined; this.connect(); }, this.retry);
       this.retry = Math.min(15_000, this.retry * 2);
     };
+  }
+  private logConnection(event: string, details: Record<string, string | number | boolean | null> = {}): void {
+    const record = { at: new Date().toISOString(), event, state: this.state(), online: navigator.onLine, visibility: document.visibilityState, ...details };
+    console.info("[codex-connection]", record);
+    try {
+      const stored = JSON.parse(localStorage.getItem("codex.connectionLog") ?? "[]");
+      const records = Array.isArray(stored) ? stored.slice(-149) : [];
+      localStorage.setItem("codex.connectionLog", JSON.stringify([...records, record]));
+    } catch { /* Diagnostics must never prevent connection recovery. */ }
+  }
+  private stopWatchdog(): void {
+    if (this.watchdogTimer !== undefined) { clearInterval(this.watchdogTimer); this.watchdogTimer = undefined; }
   }
   private accept(message: UiEvent): void { if (message.generationId) this.generation = message.generationId; if (message.sequence) this.sequence = Math.max(this.sequence, message.sequence); if (message.type === "system.snapshot") { this.snapshot.set(message); this.pending.set(message.pendingRequests ?? []); } if (message.type === "rpc.response" || message.type === "rpc.error") this.responses.update((value) => ({ ...value, [message.requestId]: message })); if (message.type === "codex.serverRequest") this.pending.update((value) => value.some((item) => item.requestKey === message.requestKey) ? value : [...value, message]); if (message.type === "attention.changed" && message.resolved) this.pending.update((value) => value.filter((item) => item.requestKey !== message.requestKey)); if (message.type === "codex.event") { this.events.update((value) => [...value.slice(-3999), message]); this.timeline.accept(message); this.notify(message); } }
   private notify(message: UiEvent): void { if (document.visibilityState === "visible" || Notification.permission !== "granted") return; if (["turn/completed", "error", "warning"].includes(message.method ?? "")) new Notification(message.method === "turn/completed" ? "Codex turn completed" : "Codex needs attention", { body: message.method, tag: `${message.generationId}:${message.sequence}` }); }

@@ -1,0 +1,28 @@
+<button type="button" class="quota-trigger" popovertarget="codex-quota-panel" [attr.aria-label]="headerLabel()">
+  <span class="quota-label">Quota</span>
+  @for(window of headerWindows(); track $index) {
+    <span class="quota-chip" [class.low]="window.remaining !== null && window.remaining <= 20"><span>{{window.label}}</span><b>{{connection.state() !== 'connected' || window.remaining === null ? '—' : window.remaining + '%'}}</b></span>
+  } @empty { <b>{{loading() ? '…' : '—'}}</b> }
+  <span class="quota-chevron" aria-hidden="true">⌄</span>
+</button>
+<section id="codex-quota-panel" popover="auto" aria-labelledby="quota-heading">
+  <header><div><h2 id="quota-heading">Codex quota</h2><small>Remaining allowance</small></div><button type="button" popovertarget="codex-quota-panel" popovertargetaction="hide" aria-label="Close quota">×</button></header>
+  @if(connection.state() !== 'connected') { <p class="quota-notice" role="status">Disconnected. Showing last known quota.</p> }
+  @if(error()) { <p class="quota-notice" role="status">{{error()}} @if(updatedAt()){Last known values shown.}</p> }
+  @if(loading()) { <p role="status">Refreshing quota…</p> }
+  @for(bucket of buckets(); track $index) {
+    <article><h3>{{bucket.limitName || bucket.limitId || 'Codex'}}</h3>
+      @for(entry of [{window: bucket.primary, label: 'Primary'}, {window: bucket.secondary, label: 'Secondary'}]; track entry.label) {
+        @if(entry.window; as window) {
+          <div class="quota-window"><div class="quota-row"><span class="quota-window-label">{{windowLabel(window.windowDurationMins, entry.label)}}</span><b>{{windowRemaining(window) === null ? 'Unavailable' : windowRemaining(window) + '%'}}</b></div><span class="remaining-label">remaining</span>
+            @if(windowRemaining(window) !== null) { <progress [value]="windowRemaining(window)" max="100" [attr.aria-label]="windowLabel(window.windowDurationMins, entry.label) + ' remaining'" [class.low]="windowRemaining(window)! <= 20"></progress> }
+            <small class="reset-countdown" [attr.title]="window.resetsAt ? ((window.resetsAt! * 1000) | date:'medium') : null">@if(resetDuration(window.resetsAt, now()); as duration){<span class="reset-icon" aria-hidden="true">↻</span>{{duration === 'Reset pending' ? duration : 'Resets in ' + duration}}} @else {Reset time unavailable}</small>
+          </div>
+        }
+      }
+      @if(!bucket.primary && !bucket.secondary) { <p>Quota windows unavailable.</p> }
+      @if(bucket.credits; as credits) { <div class="quota-row quota-credits"><span>Credits</span><b>{{credits.unlimited ? 'Unlimited' : credits.balance !== null ? credits.balance : credits.hasCredits ? 'Available' : 'None available'}}</b></div> }
+    </article>
+  } @empty { @if(!loading() && !error()){<p>Quota data is unavailable for this account.</p>} }
+  <footer><small>{{updatedAt() ? 'Updated ' + (updatedAt() | date:'shortTime') : 'No quota snapshot yet'}}</small><button type="button" (click)="refresh()" [disabled]="loading() || connection.state() !== 'connected'">Refresh</button></footer>
+</section>

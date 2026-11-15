@@ -1,9 +1,29 @@
 import { createServer } from "node:http";
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BrowserHub } from "../src/websocket/hub.js";
 
 describe("BrowserHub approvals", () => {
+  it("sends idle keepalives and stops them when the hub closes", () => {
+    vi.useFakeTimers();
+    const supervisor = new EventEmitter() as any;
+    supervisor.status = { state: "READY" };
+    const hub = new BrowserHub(createServer(), supervisor, { projects: [] } as any);
+    const sent: string[] = [];
+    const client = { readyState: 1, send: (message: string) => sent.push(message) };
+    (hub as any).wss.clients.add(client);
+    try {
+      vi.advanceTimersByTime(25_000);
+      expect(sent.map(message => JSON.parse(message))).toEqual([{ type: "system.heartbeat" }]);
+      (hub as any).wss.clients.delete(client);
+      hub.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      (hub as any).wss.clients.delete(client);
+      hub.close();
+      vi.useRealTimers();
+    }
+  });
   it("removes a pending request resolved by another app-server client", () => {
     const server = createServer();
     const supervisor = new EventEmitter() as any;
