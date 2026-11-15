@@ -1,4 +1,4 @@
-import { AfterViewInit, Component, ElementRef, OnDestroy, OnInit, ViewChild, computed, effect, inject, signal } from "@angular/core";
+import { AfterViewInit, Component, ElementRef, HostListener, OnDestroy, OnInit, ViewChild, computed, effect, inject, signal } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import { CommonModule } from "@angular/common";
 import { ConnectionService } from "./connection.service";
@@ -24,6 +24,7 @@ import { clearNotificationThreadFromUrl, notificationThreadIdFromSearch } from "
 import { detectTouchDevice, shouldSubmitOnComposerEnter } from "./composer-enter";
 import { BRANDING } from "./branding";
 import { cachedThread, completedThreadItem, ThreadHistoryStore } from "./thread-history";
+import { loadSessionRuntime } from "./session-runtime";
 
 type PrimaryTab = "chat" | "schedule" | "settings";
 interface ModelPairOption { key: string; label: string; model: string; modelProvider: string; }
@@ -82,6 +83,9 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   readonly error = signal("");
   readonly effort = signal(localStorage.getItem("codex.effort") ?? "medium");
   readonly execution = signal(localStorage.getItem("codex.execution") ?? "safe");
+  readonly dismissedApprovalKey = signal<string | null>(null);
+  readonly authDialogDismissed = signal(false);
+  readonly codexLoginDismissed = signal(false);
   readonly codexLoginRequired = signal(false);
   readonly codexLogin = signal<CodexLogin | null>(null);
   readonly codexLoginError = signal("");
@@ -258,6 +262,14 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
       }
       this.lastVisibleCount = count;
     });
+  }
+
+  @HostListener("document:pointerdown", ["$event"])
+  closeOutsideMenus(event: PointerEvent): void {
+    if (!(event.target instanceof Element)) return;
+    if (!event.target.closest(".create-actions")) this.createMenuOpen.set(false);
+    if (!event.target.closest(".menu-wrap")) this.sessionMenuOpen.set(false);
+    if (!event.target.closest(".composer-options")) this.composerSettingsOpen.set(false);
   }
 
   enableNotifications(): void { void this.notifications.enable().catch(() => undefined); }
@@ -529,21 +541,14 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
         // Paint the durable local history before requesting the network delta.
         const local = await this.history.get(thread.id);
         if (this.selectedThread()?.id !== thread.id) return;
-        if (!local?.items.length) {
-          // A brand-new browser needs a one-time runtime snapshot for model
-          // and approval state; it also seeds the persistent message cache.
-          // Subsequent PWA opens use only the incremental item endpoint.
-          const result = await this.connection.rpc("thread/resume", { threadId: thread.id });
-          this.acceptThreadRuntime(result);
-          await this.seedThreadHistory(thread.id, result.thread);
-          // Resume seeds a useful first paint; item sync fills any pages that
-          // the app-server did not include in its runtime snapshot.
-          await this.syncThreadItems(thread);
-        } else {
-          this.selectedThread.set(cachedThread(thread, local));
-          this.restoreCachedThreadModel(thread.id);
-          await this.syncThreadItems(thread);
-        }
+        if (local?.items.length) this.selectedThread.set(cachedThread(thread, local));
+        // Refresh runtime ownership even with cached history: the desktop
+        // client may now own this session, or a previous writer may have exited.
+        const result = await loadSessionRuntime((method, params) => this.connection.rpc(method, params), thread.id);
+        this.acceptThreadRuntime(result);
+        await this.seedThreadHistory(thread.id, result.thread);
+        // Fill any pages omitted from the initial runtime snapshot.
+        await this.syncThreadItems(thread);
       }
     }
     catch (error) { this.showError(error); }
@@ -651,6 +656,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   }
   removePastedImage(id: string) { this.pastedImages.update((images) => images.filter((image) => image.id !== id)); }
   async send() {
+    if (this.selectedThread()?.externalWriter) return;
     const draft = this.draft(), images = this.pastedImages(), text = draft.trim(), input = this.messageInput(text); if (!input.length || this.sending()) return; if (!this.connection.canSend()) { this.error.set("Backend is disconnected"); return; } this.sending.set(true);
     let threadId = "", localTurnId = "";
     try {
@@ -726,7 +732,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   dismissUpdate() { this.updater.dismiss(); }
   formatThread(thread: any) { return sessionTitle({ ...thread, firstPrompt: this.firstPrompt(thread) }); }
   threadLocation(thread: any) { return sessionLocation(this.projects(), thread); }
-  threadStatus(thread: any) { const status = thread?.status?.type ?? thread?.status ?? "idle"; return status === "inProgress" ? "Running" : status.charAt(0).toUpperCase() + status.slice(1); }
+  threadStatus(thread: any) { if (thread?.externalWriter) return "Open elsewhere"; const status = thread?.status?.type ?? thread?.status ?? "idle"; return status === "inProgress" ? "Running" : status.charAt(0).toUpperCase() + status.slice(1); }
   markdown(value: string) { return renderMarkdown(value); }
   commandSummary(item: ChatItem) { if (item.status === "inProgress") return "Running…"; if (item.meta?.exitCode && item.meta.exitCode !== 0) return `Failed · exit code ${item.meta.exitCode}`; return [item.status === "completed" ? "Completed" : item.status, item.meta?.duration].filter(Boolean).join(" · ") || "View result"; }
   changes(item: ChatItem) { return item.meta?.changes ?? []; }

@@ -149,7 +149,7 @@ export class ScheduleComponent {
     this.dialogError.set(null);
   }
 
-  onBackdropMouseDown(event: MouseEvent): void {
+  onBackdropPointerDown(event: PointerEvent): void {
     if (event.target === event.currentTarget) this.closeDialog();
   }
 

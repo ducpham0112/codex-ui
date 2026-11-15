@@ -1,4 +1,5 @@
 import { Injectable } from "@angular/core";
+import { openBrowserDatabase } from "./browser-database";
 
 export interface CachedThreadItem {
   /** App-server item ID: the cross-device deduplication key. */
@@ -54,15 +55,7 @@ export class ThreadHistoryStore {
   // Live item notifications can arrive in the same microtask. Serialize writes
   // so two read-modify-write merges never overwrite one another.
   private writes: Promise<void> = Promise.resolve();
-  private readonly db = new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open("codex-control", 2);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains("drafts")) request.result.createObjectStore("drafts");
-      if (!request.result.objectStoreNames.contains("thread-history")) request.result.createObjectStore("thread-history");
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+  private readonly db = openBrowserDatabase();
   async get(threadId: string): Promise<ThreadHistory | undefined> {
     const db = await this.db;
     return new Promise((resolve, reject) => { const request = db.transaction("thread-history").objectStore("thread-history").get(threadId); request.onsuccess = () => resolve(isCurrentThreadHistory(request.result) ? request.result : undefined); request.onerror = () => reject(request.error); });
