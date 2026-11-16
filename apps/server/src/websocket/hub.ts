@@ -1,3 +1,4 @@
+import type { QuotaProtection } from "../quota/protection.js";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
@@ -20,7 +21,7 @@ const MAX_BROWSER_WS_PAYLOAD_BYTES = 2 * 1024 * 1024;
 export class BrowserHub {
   private readonly heartbeat: ReturnType<typeof setInterval>;
   private readonly wss: WebSocketServer; private readonly stream: EventStream; private readonly pending = new Map<string, { id: number | string; method: string; params: unknown }>(); private readonly attention = new AttentionCoordinator(); private readonly observedThreads = new Map<string, unknown>();
-  constructor(server: Server, private readonly supervisor: AppServerSupervisor, private readonly projects: ProjectRegistry, readonly metrics = new Metrics(), origin?: string, capacity = 10_000, private readonly dispatcher?: NotificationDispatcher) {
+  constructor(server: Server, private readonly supervisor: AppServerSupervisor, private readonly projects: ProjectRegistry, readonly metrics = new Metrics(), origin?: string, capacity = 10_000, private readonly dispatcher?: NotificationDispatcher, private readonly quotaProtection?: QuotaProtection) {
     this.stream = new EventStream(capacity); this.wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BROWSER_WS_PAYLOAD_BYTES });
     // Keep idle proxies/tunnels active even when browsers throttle background
     // timers. This is transport traffic, so it does not enter event replay.
@@ -121,7 +122,7 @@ export class BrowserHub {
     this.metrics.rpcRequests++;
     try {
       if (message.method === threadSyncMethod) return this.send(client, { type: "rpc.response", requestId: message.requestId, result: await this.syncThreadItems(message.params as any) });
-      const result = await this.supervisor.broker.request(message.method, message.params ?? {}); if (message.method === "thread/start" || message.method === "thread/fork") this.rememberThread((result as any)?.thread); this.send(client, { type: "rpc.response", requestId: message.requestId, result });
+      const result = await (this.quotaProtection ?? this.supervisor.broker).request(message.method, message.params ?? {}); if (message.method === "thread/start" || message.method === "thread/fork") this.rememberThread((result as any)?.thread); this.send(client, { type: "rpc.response", requestId: message.requestId, result });
     }
     catch (error) { this.metrics.rpcErrors++; this.send(client, { type: "rpc.error", requestId: message.requestId, error: { code: "CODEX_RPC_ERROR", message: error instanceof Error ? error.message : String(error) } }); }
   }

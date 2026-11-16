@@ -12,6 +12,7 @@ const MAX_ERROR_LENGTH = 512;
 export interface SchedulerOptions {
   registry: ScheduleRegistry;
   supervisor: Pick<AppServerSupervisor, "status" | "broker" | "on" | "off">;
+  turnRequests?: Pick<AppServerSupervisor["broker"], "request">;
   broadcast: (schedule: ScheduleRecord) => void;
   tickMs?: number;
   missWindowMs?: number;
@@ -26,6 +27,7 @@ export interface SchedulerEvents {
 }
 
 export class Scheduler extends EventEmitter<SchedulerEvents> {
+  private readonly turnRequests?: Pick<AppServerSupervisor["broker"], "request">;
   private readonly registry: ScheduleRegistry;
   private readonly supervisor: SchedulerOptions["supervisor"];
   private readonly broadcast: SchedulerOptions["broadcast"];
@@ -43,6 +45,7 @@ export class Scheduler extends EventEmitter<SchedulerEvents> {
 
   constructor(options: SchedulerOptions) {
     super();
+    this.turnRequests = options.turnRequests;
     this.registry = options.registry;
     this.supervisor = options.supervisor;
     this.broadcast = options.broadcast;
@@ -114,7 +117,7 @@ export class Scheduler extends EventEmitter<SchedulerEvents> {
       threadId = extractThreadId(start);
       if (!threadId) throw new Error("app-server did not return a thread id");
 
-      const turn = await broker.request<unknown>("turn/start", {
+      const turn = await (this.turnRequests ?? broker).request<unknown>("turn/start", {
         threadId,
         input: [{ type: "text", text: stored.prompt }]
       });

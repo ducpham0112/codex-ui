@@ -3,7 +3,7 @@ import type { Writable } from "node:stream";
 import { isRequest, isResponse, type RpcMessage, type RpcNotification, type RpcRequest } from "./types.js";
 
 export class RpcError extends Error {
-  constructor(public readonly code: number, message: string, public readonly data?: unknown) {
+  constructor(public readonly code: number, message: string, public readonly data?: unknown, public readonly responseReceived = true) {
     super(message);
   }
 }
@@ -22,7 +22,7 @@ export class RpcBroker extends EventEmitter<BrokerEvents> {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new RpcError(-32000, `RPC ${method} timed out after ${this.timeoutMs}ms`));
+        reject(new RpcError(-32000, `RPC ${method} timed out after ${this.timeoutMs}ms`, undefined, false));
       }, this.timeoutMs);
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
       this.write({ id, method, params });

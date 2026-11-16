@@ -1,3 +1,6 @@
+import { homedir } from "node:os";
+import { QuotaProtection } from "./quota/protection.js";
+import { handleQuotaProtectionApi } from "./http/quota-protection-api.js";
 import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -23,6 +26,8 @@ const supervisor = new AppServerSupervisor({ executable: process.env.CODEX_EXECU
 supervisor.on("stderr", (line) => { if (line) process.stderr.write(`[codex app-server] ${line}\n`); });
 const projects = await ProjectRegistry.load(process.env.PROJECTS_CONFIG ?? join(workspaceRoot, "config/projects.yaml"));
 const schedules = await ScheduleRegistry.load({ safeRoot: process.env.PROJECTS_ROOT });
+const quotaProtection = await QuotaProtection.load(supervisor, process.env.CODEX_UI_QUOTA_FILE ?? join(process.env.CODEX_HOME ?? homedir() + "/.codex", "codex-ui/quota-protection.json"));
+quotaProtection.start();
 const branding = brandingFromEnvironment(process.env);
 const webPush = webPushConfig(process.env, join(workspaceRoot, "data/web-push-subscriptions.json"));
 const subscriptions = new WebPushSubscriptionStore(webPush.subscriptionsPath);
@@ -58,6 +63,7 @@ const server = createServer(async (request, response) => {
     } catch (error) { response.statusCode = 400; return response.end(JSON.stringify({ error: error instanceof Error ? error.message : "Invalid web push subscription" })); }
   }
   if (request.url === "/metrics") { response.setHeader("content-type", "text/plain; version=0.0.4"); return response.end(hub.metrics.render()); }
+  if (await handleQuotaProtectionApi(request, response, quotaProtection, process.env.PUBLIC_ORIGIN)) return;
   if (await handleModelPresetsApi(request, response)) return;
   if (await handleProjectsApi(request, response, projects, process.env.PUBLIC_ORIGIN, () => hub.projectsChanged())) return;
   if (await handleSessionsApi(request, response, hub, process.env.PUBLIC_ORIGIN)) return;
@@ -72,8 +78,8 @@ const server = createServer(async (request, response) => {
   response.statusCode = 404; response.end(JSON.stringify({ error: "Not found" }));
 });
 const dispatcher = webPush.enabled ? new NotificationDispatcher(webPush, subscriptions, branding.shortName) : undefined;
-const hub = new BrowserHub(server, supervisor, projects, undefined, process.env.PUBLIC_ORIGIN, 10_000, dispatcher);
-const scheduler = new Scheduler({ registry: schedules, supervisor, broadcast: (schedule) => hub.broadcastScheduleChange(schedule) });
+const hub = new BrowserHub(server, supervisor, projects, undefined, process.env.PUBLIC_ORIGIN, 10_000, dispatcher, quotaProtection);
+const scheduler = new Scheduler({ registry: schedules, supervisor, turnRequests: quotaProtection, broadcast: (schedule) => hub.broadcastScheduleChange(schedule) });
 scheduler.start();
 const projectRefresh = setInterval(() => {
   void projects.refreshDiscovered().then((changed) => {
@@ -81,7 +87,7 @@ const projectRefresh = setInterval(() => {
   }).catch((error) => process.stderr.write(`project discovery refresh failed: ${error instanceof Error ? error.message : String(error)}\n`));
 }, 5_000);
 server.listen(port, host, () => process.stdout.write(`codex-control server listening on http://${host}:${port}\n`));
-const shutdown = async () => { clearInterval(projectRefresh); await scheduler.stop(); hub.close(); server.close(); await supervisor.stop(); };
+const shutdown = async () => { clearInterval(projectRefresh); await scheduler.stop(); await quotaProtection.close(); hub.close(); server.close(); await supervisor.stop(); };
 process.once("SIGINT", () => void shutdown());
 process.once("SIGTERM", () => void shutdown());
 

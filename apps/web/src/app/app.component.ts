@@ -14,6 +14,8 @@ import { approvalResult, supportsSessionApproval as canApproveForSession, type A
 import { filterProjects, groupSessions, projectLabel, sessionTitle } from "./selector-utils";
 import { configureNewTabLink } from "./external-links";
 import { ScheduleComponent } from "./schedule.component";
+import { QuotaProtectionComponent } from "./quota-protection.component";
+import { QuotaProtectionService } from "./quota-protection.service";
 import { QuotaComponent } from "./quota.component";
 import { belongsToThread, mergeResumedThread } from "./thread-events";
 import { modelPairKey } from "./model-pair";
@@ -35,7 +37,7 @@ interface CodexLogin { loginId: string; verificationUrl: string; userCode: strin
 type ComposerInput = { type: "text"; text: string; text_elements: []; } | { type: "image"; url: string; };
 const PROJECT_SETUP_PROMPT = "Initialize this project by creating a README.md that explains the project purpose, initial structure, and getting-started instructions. Do not create unrelated files.";
 
-@Component({ selector: "codex-root", standalone: true, imports: [CommonModule, FormsModule, ScheduleComponent, QuotaComponent], templateUrl: "./app.component.html" })
+@Component({ selector: "codex-root", standalone: true, imports: [CommonModule, FormsModule, ScheduleComponent, QuotaComponent, QuotaProtectionComponent], templateUrl: "./app.component.html" })
 export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   private static readonly SESSION_POLL_MS = 15_000;
   @ViewChild("shell") shell?: ElementRef<HTMLElement>;
@@ -70,6 +72,7 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   readonly history = inject(ThreadHistoryStore);
   readonly updater = inject(UpdateService);
   readonly brand = inject(BRANDING);
+  readonly quotaProtection = inject(QuotaProtectionService);
   readonly threads = signal<any[]>([]);
   readonly selectedThread = signal<any>(null);
   readonly optimisticMessages = signal<OptimisticMessage[]>([]);
@@ -702,6 +705,10 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
     if (!thread || this.stopping()) return;
     this.stopping.set(true);
     try {
+      if (this.quotaProtection.status()?.paused.some(work => work.threadId === thread.id)) {
+        await this.quotaProtection.cancel(thread.id);
+        return;
+      }
       let turnId = this.activeTurnId();
       if (!turnId) {
         // Cached item history intentionally does not retain mutable turn
