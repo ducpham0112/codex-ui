@@ -11,7 +11,7 @@ import { BUNDLE_COMMIT, BUNDLE_VERSION } from "./bundle-version.generated";
  */
 export interface AppUpdater {
   readonly isEnabled: boolean;
-  readonly versionUpdates: Observable<{ type: string }>;
+  readonly versionUpdates: Observable<{ type: string; latestVersion?: { hash: string } }>;
   activateUpdate(): Promise<boolean>;
 }
 
@@ -39,22 +39,20 @@ export interface VersionInfo {
 @Injectable({ providedIn: "root" })
 export class UpdateService {
   private brandTitle = "Codex Control";
-  // Persisted across reloads so the banner does not re-appear every time the
-  // user rejects Reload/Later while the server is reporting a build that
-  // the running bundle has not yet caught up with. The key is namespaced to
-  // keep it easy to clear during local debugging.
+  // Persist the downloaded build hash, rather than the server release label.
+  // The same release can be rebuilt and server metadata can differ from the UI.
   static readonly DISMISSED_KEY = "codex.update.dismissedVersion";
   static readonly NOTIFICATION_TAG_PREFIX = "codex-update:";
 
   private updater: AppUpdater | null = null;
+  private readyHash: string | null = null;
+  private dismissedHash: string | null = null;
   readonly available = signal<UpdateAvailable | null>(null);
   readonly running = signal<VersionInfo | null>(null);
   readonly checkedAt = signal<number | null>(null);
   readonly currentVersion = BUNDLE_VERSION;
   readonly currentCommit = BUNDLE_COMMIT;
-  // Versions we have already surfaced via the system Notification for this
-  // session. We never re-notify for the same build, even after multiple
-  // refresh() calls or VERSION_READY events.
+  // Deduplicate notifications by downloaded build, including same-version rebuilds.
   private readonly notifiedVersions = new Set<string>();
   // Injected by tests so the real `new Notification(...)` path is not
   // executed under jsdom. The default delegates to fireSystemNotification,
@@ -85,7 +83,13 @@ export class UpdateService {
     if (!updater || !updater.isEnabled) return;
     updater.versionUpdates
       .pipe(filter((event) => event.type === "VERSION_READY"))
-      .subscribe(() => { void this.refresh(); });
+      .subscribe((event) => {
+        const hash = event.latestVersion?.hash;
+        if (!hash) return;
+        this.readyHash = hash;
+        this.surfaceReadyUpdate();
+        void this.refresh();
+      });
     void this.refresh();
   }
 
@@ -99,39 +103,29 @@ export class UpdateService {
       const body = (await response.json()) as VersionInfo;
       this.running.set(body);
       this.checkedAt.set(Date.now());
-      // If the server reports a different application version than the one
-      // baked into this bundle, surface a banner so the user can reload.
-      if (body.application && body.application !== BUNDLE_VERSION) {
-        const dismissed = this.readDismissedVersion();
-        if (dismissed !== body.application) {
-          this.surfaceUpdate({ version: body.application, commit: body.commit ?? null });
-        }
-      } else if (body.application && body.application === BUNDLE_VERSION) {
-        // The bundle has caught up with the server, so forget any prior
-        // dismissal: a future deploy should be allowed to notify again.
-        this.clearDismissedVersion();
-        if (this.available()) this.available.set(null);
-      }
+      this.surfaceReadyUpdate();
     } catch {
       // Transient network failure; leave signals untouched.
     }
   }
 
-  /**
-   * Set the available-update signal and fire one system Notification per
-   * version. Splitting this from `available.set(...)` keeps the banner and
-   * the OS-level alert in lockstep: both hide once the user reloads into
-   * the matching build, and both come back for the next deploy.
-   */
-  private surfaceUpdate(update: UpdateAvailable): void {
+  /** Only a downloaded worker build can establish that reloading is useful. */
+  private surfaceReadyUpdate(): void {
+    const hash = this.readyHash;
+    if (!hash) return;
+    if (this.dismissedHash === hash || this.readDismissedVersion() === hash) {
+      this.available.set(null);
+      return;
+    }
+    const metadata = this.running();
+    const update = { version: metadata?.application || hash.slice(0, 8), commit: metadata?.commit ?? null };
     this.available.set(update);
-    if (this.notifiedVersions.has(update.version)) return;
-    this.notifiedVersions.add(update.version);
+    if (this.notifiedVersions.has(hash)) return;
+    this.notifiedVersions.add(hash);
     try {
       this.notifyAvailable(update);
     } catch {
-      // The default implementation swallows its own errors, but custom
-      // notifiers (tests, future integrations) must not break refresh().
+      // Notification failure must not prevent the in-app banner.
     }
   }
 
@@ -157,7 +151,7 @@ export class UpdateService {
     try {
       new notificationCtor(`${this.brandTitle} ${update.version} ready`, {
         body: "A new build is available. Reload to switch to the latest PWA version.",
-        tag: `${UpdateService.NOTIFICATION_TAG_PREFIX}${update.version}`,
+        tag: `${UpdateService.NOTIFICATION_TAG_PREFIX}${this.readyHash ?? update.version}`,
         silent: false,
       });
     } catch {
@@ -169,6 +163,7 @@ export class UpdateService {
   /** Apply the pending service-worker update and reload the page. */
   async applyUpdate(): Promise<void> {
     this.available.set(null);
+    this.readyHash = null;
     if (!this.updater || !this.updater.isEnabled) {
       location.reload();
       return;
@@ -184,12 +179,14 @@ export class UpdateService {
 
   /** Dismiss the update notification without reloading. */
   dismiss(): void {
-    const current = this.available();
-    if (current) this.writeDismissedVersion(current.version);
+    if (this.available() && this.readyHash) {
+      this.dismissedHash = this.readyHash;
+      this.writeDismissedVersion(this.readyHash);
+    }
     this.available.set(null);
   }
 
-  /** Read the last version the user dismissed without reloading. */
+  /** Read the last downloaded build the user dismissed. */
   private readDismissedVersion(): string | null {
     if (typeof localStorage === "undefined") return null;
     try {
@@ -199,7 +196,7 @@ export class UpdateService {
     }
   }
 
-  /** Persist the version the user dismissed so polling does not resurface the same banner. */
+  /** Persist the build hash so reloads do not resurface a dismissed banner. */
   private writeDismissedVersion(version: string): void {
     if (typeof localStorage === "undefined") return;
     try {
@@ -210,13 +207,4 @@ export class UpdateService {
     }
   }
 
-  /** Clear any dismissed-version marker; used once the bundle catches up with the server. */
-  private clearDismissedVersion(): void {
-    if (typeof localStorage === "undefined") return;
-    try {
-      localStorage.removeItem(UpdateService.DISMISSED_KEY);
-    } catch {
-      // ignore
-    }
-  }
 }

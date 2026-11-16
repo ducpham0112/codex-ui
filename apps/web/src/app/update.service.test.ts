@@ -1,245 +1,196 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Subject } from "rxjs";
-import { AppUpdater, UpdateService } from "./update.service";
+import { UpdateService } from "./update.service";
 import { BUNDLE_VERSION } from "./bundle-version.generated";
 
-const makeUpdater = (): AppUpdater & { activateUpdate: ReturnType<typeof vi.fn>; versionUpdates: Subject<{ type: string }> } => {
-  const subject = new Subject<{ type: string }>();
-  return { isEnabled: true, versionUpdates: subject, activateUpdate: vi.fn().mockResolvedValue(true) };
+type UpdateEvent = { type: string; latestVersion?: { hash: string } };
+const makeUpdater = (isEnabled = true) => ({
+  isEnabled,
+  versionUpdates: new Subject<UpdateEvent>(),
+  activateUpdate: vi.fn().mockResolvedValue(true),
+});
+const ready = (updater: ReturnType<typeof makeUpdater>, hash = "build-a") => {
+  updater.versionUpdates.next({ type: "VERSION_READY", latestVersion: { hash } });
 };
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const versionResponse = (application = "v9.9.9") => new Response(JSON.stringify({
+  application, commit: "abc1234", node: "v20.0.0", codex: "1.2.3",
+  generatedProtocol: "1.2.3", compatible: true,
+}), { headers: { "content-type": "application/json" } });
 
-const installFetchStub = (responder: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> | Response) => {
-  const original = (globalThis as any).fetch;
-  (globalThis as any).fetch = vi.fn((input, init) => Promise.resolve(responder(input as RequestInfo | URL, init)));
-  return () => { (globalThis as any).fetch = original; };
-};
-
-const stubReload = () => {
-  const reload = vi.fn();
-  Object.defineProperty(window, "location", { configurable: true, value: { ...window.location, reload } });
-  return reload;
-};
-
-const setVisibilityState = (state: "visible" | "hidden") => {
-  const original = Object.getOwnPropertyDescriptor(window.document, "visibilityState");
-  Object.defineProperty(window.document, "visibilityState", { configurable: true, get: () => state });
-  return { restore: () => { if (original) Object.defineProperty(window.document, "visibilityState", original); else delete (window.document as unknown as Record<string, unknown>).visibilityState; } };
-};
-
-interface NotificationStub {
-  instances: { title: string; options?: NotificationOptions }[];
-  restore: () => void;
-}
-
-const stubNotification = ({ permission }: { permission: NotificationPermission }): NotificationStub => {
-  const instances: { title: string; options?: NotificationOptions }[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const Ctor: any = function NotificationStub(title: string, options?: NotificationOptions) { instances.push({ title, options }); };
-  Ctor.permission = permission;
-  Ctor.requestPermission = vi.fn().mockResolvedValue(permission);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).Notification = Ctor;
-  return { instances, restore: () => { delete (globalThis as any).Notification; } };
-};
-
-
+// Only the browser/network boundaries are stubbed; all update decisions use the real service.
 describe("UpdateService", () => {
-  let restoreFetch: () => void;
-
   beforeEach(() => {
-    restoreFetch = () => {};
-    // Reset the persisted dismissal marker between tests so a stale value
-    // does not leak between scenarios.
-    try { window.localStorage.removeItem(UpdateService.DISMISSED_KEY); } catch { /* ignore */ }
+    window.localStorage.clear();
+    vi.stubGlobal("fetch", vi.fn(async () => versionResponse()));
   });
-
   afterEach(() => {
-    restoreFetch();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it("exposes the bundle version baked at build time", () => {
-    restoreFetch = installFetchStub(() => new Response("{}", { status: 200 }));
+  it("hydrates Settings metadata without announcing a server version mismatch", async () => {
     const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    await settle();
     expect(service.currentVersion).toBe(BUNDLE_VERSION);
-  });
-
-  it("hydrates the running version from /api/version on construction", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const service = new UpdateService();
-    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(service.running()?.application).toBe("v9.9.9");
-    expect(service.running()?.commit).toBe("abc1234");
-  });
-
-  it("flags an available update when the server version differs from the bundle", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const service = new UpdateService();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(service.available()?.version).toBe("v9.9.9");
-    expect(service.available()?.commit).toBe("abc1234");
-  });
-
-  it("does not flag an update when the bundle matches the server version", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: BUNDLE_VERSION, commit: null, node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const service = new UpdateService();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(service.checkedAt()).not.toBeNull();
     expect(service.available()).toBeNull();
   });
 
-  it("reacts to VERSION_READY by re-fetching /api/version", async () => {
-    let call = 0;
-    restoreFetch = installFetchStub(() => {
-      call += 1;
-      // First two fetches run during construction/bind and observe the
-      // current bundle version. The VERSION_READY handler triggers a third
-      // fetch that exposes the new server build.
-      const application = call <= 2 ? BUNDLE_VERSION : "v9.9.9";
-      return new Response(JSON.stringify({ application, commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } });
-    });
-    const updater = makeUpdater();
+  it.each([null, makeUpdater(false)])("does not prompt without an enabled worker: %s", async (updater) => {
     const service = new UpdateService();
     service.bind(updater);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(call).toBe(2);
-    expect(service.available()).toBeNull();
-    updater.versionUpdates.next({ type: "VERSION_READY" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(call).toBeGreaterThanOrEqual(3);
-    expect(service.available()?.version).toBe("v9.9.9");
-  });
-
-  it("applies the pending update by activating the worker and reloading", async () => {
-    restoreFetch = installFetchStub(() => new Response("{}", { status: 200 }));
-    const reload = stubReload();
-    const updater = makeUpdater();
-    const service = new UpdateService();
-    service.bind(updater);
-    service.available.set({ version: "v9.9.9", commit: null });
-    await service.applyUpdate();
-    expect(updater.activateUpdate).toHaveBeenCalled();
-    expect(reload).toHaveBeenCalled();
-    expect(service.available()).toBeNull();
-  });
-
-  it("dismisses the update notification without reloading", () => {
-    restoreFetch = installFetchStub(() => new Response("{}", { status: 200 }));
-    const reload = stubReload();
-    const updater = makeUpdater();
-    const service = new UpdateService();
-    service.bind(updater);
-    service.available.set({ version: "v9.9.9", commit: null });
-    service.dismiss();
-    expect(service.available()).toBeNull();
-    expect(reload).not.toHaveBeenCalled();
-    expect(updater.activateUpdate).not.toHaveBeenCalled();
-  });
-
-  it("persists the dismissed version so polling does not reflash the same banner", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const updater = makeUpdater();
-    const first = new UpdateService();
-    first.bind(updater);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(first.available()?.version).toBe("v9.9.9");
-    first.dismiss();
-    expect(first.available()).toBeNull();
-    expect(window.localStorage.getItem(UpdateService.DISMISSED_KEY)).toBe("v9.9.9");
-    // A second polling refresh on the same instance must not bring the banner back.
-    await first.refresh();
-    expect(first.available()).toBeNull();
-  });
-
-  it("hides a residual banner when the bundle catches up with the server", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: BUNDLE_VERSION, commit: null, node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    // Pretend a previous version was dismissed so we can confirm it is cleared
-    // once the server's reported build matches the bundle.
-    window.localStorage.setItem(UpdateService.DISMISSED_KEY, "v9.9.9");
-    const updater = makeUpdater();
-    const service = new UpdateService();
-    service.bind(updater);
-    service.available.set({ version: "v9.9.9", commit: null });
+    await settle();
     await service.refresh();
     expect(service.available()).toBeNull();
-    expect(window.localStorage.getItem(UpdateService.DISMISSED_KEY)).toBeNull();
   });
 
-  it("fires a system notification when an update becomes available and the tab is hidden", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const visibility = setVisibilityState("hidden");
-    const notification = stubNotification({ permission: "granted" });
-    try {
-      const service = new UpdateService();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(service.available()?.version).toBe("v9.9.9");
-      expect(notification.instances).toHaveLength(1);
-      expect(notification.instances[0].title).toBe("Codex Control v9.9.9 ready");
-      expect(notification.instances[0].options.tag).toBe(`${UpdateService.NOTIFICATION_TAG_PREFIX}v9.9.9`);
-    } finally {
-      visibility.restore();
-      notification.restore();
+  it("does not announce an older server version or an undownloaded build", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => versionResponse("0.0.0")));
+    const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    updater.versionUpdates.next({ type: "VERSION_DETECTED", latestVersion: { hash: "build-a" } });
+    await settle();
+    expect(service.available()).toBeNull();
+  });
+
+  it("announces a downloaded build on VERSION_READY", async () => {
+    const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    await settle();
+    ready(updater);
+    await settle();
+    expect(service.available()).toEqual({ version: "v9.9.9", commit: "abc1234" });
+  });
+
+  it("announces a new build even when its release version matches the running bundle", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => versionResponse(BUNDLE_VERSION)));
+    const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    await settle();
+    ready(updater);
+    await settle();
+    expect(service.available()?.version).toBe(BUNDLE_VERSION);
+    await service.refresh();
+    expect(service.available()).not.toBeNull();
+  });
+
+  it("still announces a downloaded build when the version API is unavailable", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
+    const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    ready(updater);
+    await settle();
+    expect(service.available()).not.toBeNull();
+    expect(service.running()).toBeNull();
+  });
+
+  it("ignores a ready event without build identity", async () => {
+    const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    updater.versionUpdates.next({ type: "VERSION_READY" });
+    await settle();
+    expect(service.available()).toBeNull();
+  });
+
+  it("remembers a dismissed build across polling, repeated ready events, and reloads", async () => {
+    const first = new UpdateService();
+    const updater = makeUpdater();
+    first.bind(updater);
+    ready(updater);
+    await settle();
+    first.dismiss();
+    await first.refresh();
+    ready(updater);
+    await settle();
+    expect(first.available()).toBeNull();
+    const second = new UpdateService();
+    const nextUpdater = makeUpdater();
+    second.bind(nextUpdater);
+    await settle();
+    ready(nextUpdater);
+    await settle();
+    expect(second.available()).toBeNull();
+    // A fresh download with the same release version is a distinct update.
+    ready(nextUpdater, "build-b");
+    await settle();
+    expect(second.available()?.version).toBe("v9.9.9");
+  });
+
+  it("keeps a dismissed build hidden when localStorage is unavailable", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("blocked"); });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("blocked"); });
+    const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    ready(updater);
+    await settle();
+    service.dismiss();
+    ready(updater);
+    await service.refresh();
+    expect(service.available()).toBeNull();
+  });
+
+  it("does not prompt after reloading into the latest build without another ready event", async () => {
+    const service = new UpdateService();
+    service.bind(makeUpdater());
+    await settle();
+    await service.refresh();
+    expect(service.available()).toBeNull();
+  });
+
+  it.each([
+    ["hidden", "granted", 1],
+    ["visible", "granted", 0],
+    ["hidden", "default", 0],
+  ] as const)("notifies once per downloaded build with visibility=%s permission=%s", async (visibility, permission, count) => {
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue(visibility);
+    const notification = vi.fn();
+    vi.stubGlobal("Notification", Object.assign(function (title: string, options: NotificationOptions) {
+      notification(title, options);
+    }, { permission }));
+    const service = new UpdateService();
+    const updater = makeUpdater();
+    service.bind(updater);
+    await settle();
+    expect(notification).not.toHaveBeenCalled();
+    ready(updater);
+    await settle();
+    ready(updater);
+    await service.refresh();
+    expect(notification).toHaveBeenCalledTimes(count);
+    if (count) {
+      expect(notification).toHaveBeenLastCalledWith("Codex Control v9.9.9 ready", expect.objectContaining({ tag: "codex-update:build-a" }));
+      ready(updater, "build-b");
+      await settle();
+      expect(notification).toHaveBeenCalledTimes(2);
     }
   });
 
-  it("does not fire a system notification while the tab is visible", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const visibility = setVisibilityState("visible");
-    const notification = stubNotification({ permission: "granted" });
-    try {
-      const service = new UpdateService();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(service.available()?.version).toBe("v9.9.9");
-      expect(notification.instances).toHaveLength(0);
-    } finally {
-      visibility.restore();
-      notification.restore();
-    }
-  });
-
-  it("does not fire a system notification when browser permission is not granted", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const visibility = setVisibilityState("hidden");
-    const notification = stubNotification({ permission: "default" });
-    try {
-      const service = new UpdateService();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(notification.instances).toHaveLength(0);
-    } finally {
-      visibility.restore();
-      notification.restore();
-    }
-  });
-
-  it("does not fire twice for the same version across repeated refreshes", async () => {
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const visibility = setVisibilityState("hidden");
-    const notification = stubNotification({ permission: "granted" });
-    try {
-      const service = new UpdateService();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      await service.refresh();
-      await service.refresh();
-      expect(notification.instances).toHaveLength(1);
-    } finally {
-      visibility.restore();
-      notification.restore();
-    }
-  });
-
-  it("does not fire when the version has already been dismissed this session", async () => {
-    window.localStorage.setItem(UpdateService.DISMISSED_KEY, "v9.9.9");
-    restoreFetch = installFetchStub(() => new Response(JSON.stringify({ application: "v9.9.9", commit: "abc1234", node: "v20.0.0", codex: "1.2.3", generatedProtocol: "1.2.3", compatible: true }), { status: 200, headers: { "content-type": "application/json" } }));
-    const visibility = setVisibilityState("hidden");
-    const notification = stubNotification({ permission: "granted" });
-    try {
-      const service = new UpdateService();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(service.available()).toBeNull();
-      expect(notification.instances).toHaveLength(0);
-    } finally {
-      visibility.restore();
-      notification.restore();
-    }
+  it("activates the worker and reloads only when the user applies the update", async () => {
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+    const updater = makeUpdater();
+    const service = new UpdateService();
+    service.bind(updater);
+    ready(updater);
+    await settle();
+    expect(reload).not.toHaveBeenCalled();
+    service.dismiss();
+    expect(reload).not.toHaveBeenCalled();
+    ready(updater, "build-b");
+    await service.applyUpdate();
+    expect(updater.activateUpdate).toHaveBeenCalledOnce();
+    expect(reload).toHaveBeenCalledOnce();
+    expect(service.available()).toBeNull();
   });
 });
