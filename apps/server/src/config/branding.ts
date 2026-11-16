@@ -58,10 +58,14 @@ export function brandingManifest(branding: Branding): Record<string, unknown> {
   return {
     name: branding.title,
     short_name: branding.shortName,
+    id: "/",
+    scope: "/",
     start_url: "/",
     display: "standalone",
     background_color: branding.backgroundColor,
     theme_color: branding.themeColor,
-    icons: [{ src: branding.iconUrl, sizes: "any", purpose: "any maskable" }]
+    icons: branding.iconUrl === DEFAULT_BRANDING.iconUrl
+      ? [192, 512].map((size) => ({ src: `/icons/app-${size}.png`, sizes: `${size}x${size}`, type: "image/png", purpose: "any maskable" }))
+      : [{ src: branding.iconUrl, sizes: "any", purpose: "any maskable" }]
   };
 }

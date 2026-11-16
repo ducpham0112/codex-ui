@@ -73,7 +73,7 @@ const server = createServer(async (request, response) => {
     const requested = normalize((request.url ?? "/").split("?")[0]).replace(/^\.\.(\/|\\|$)/, "");
     let file = join(webRoot, requested === "/" ? "index.html" : requested);
     if (!file.startsWith(webRoot) || !existsSync(file) || statSync(file).isDirectory()) file = join(webRoot, "index.html");
-    if (existsSync(file)) { const mime: Record<string,string> = { ".html":"text/html; charset=utf-8", ".js":"text/javascript; charset=utf-8", ".css":"text/css; charset=utf-8", ".json":"application/json", ".svg":"image/svg+xml", ".webmanifest":"application/manifest+json" }; response.setHeader("content-type", mime[extname(file)] ?? "application/octet-stream"); if (request.method === "HEAD") return response.end(); if (file === join(webRoot, "index.html")) return response.end(renderIndex(await readFile(file, "utf8"))); return createReadStream(file).pipe(response); }
+    if (existsSync(file)) { const mime: Record<string,string> = { ".html":"text/html; charset=utf-8", ".js":"text/javascript; charset=utf-8", ".css":"text/css; charset=utf-8", ".json":"application/json", ".png":"image/png", ".svg":"image/svg+xml", ".webmanifest":"application/manifest+json" }; response.setHeader("content-type", mime[extname(file)] ?? "application/octet-stream"); if (request.method === "HEAD") return response.end(); if (file === join(webRoot, "index.html")) return response.end(renderIndex(await readFile(file, "utf8"))); return createReadStream(file).pipe(response); }
   }
   response.statusCode = 404; response.end(JSON.stringify({ error: "Not found" }));
 });

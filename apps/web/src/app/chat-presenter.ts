@@ -35,7 +35,6 @@ function eventItem(event: UiEvent): ChatItem | null {
   const params = event.params ?? {}; const turnId = params.turnId ?? params.turn?.id ?? "live";
   if (event.method === "item/completed" || event.method === "item/started") return presentThreadItem(params.item, turnId);
   if (event.method === "item/agentMessage/delta") return { key: `delta:${params.itemId ?? event.sequence}`, kind: "assistant", body: params.delta ?? "" };
-  if (event.method?.includes("reasoning") && event.method.endsWith("Delta")) return { key: `delta:${params.itemId ?? event.sequence}`, kind: "reasoning", title: "Reasoning summary", body: params.delta ?? "" };
   if (event.method === "turn/plan/updated") return { key: `plan:${turnId}`, kind: "plan", title: "Plan", body: "", meta: { steps: params.plan ?? [] } };
   if (event.method === "turn/diff/updated") return { key: `diff:${turnId}`, kind: "change", title: "Working changes", body: params.diff ?? "", meta: { diff: params.diff ?? "", changes: [] } };
   if (event.method?.includes("outputDelta")) return { key: `delta:${params.itemId ?? params.processId ?? event.sequence}`, kind: "command", title: "Command output", body: params.delta ?? "", status: "inProgress" };
@@ -54,7 +53,7 @@ export function buildChatItems(thread: any, events: UiEvent[], optimistic: ChatI
   const consumedOptimisticKeys = new Set<string>();
   const matchesOptimistic = (left: ChatItem, right: ChatItem) => left.kind === "user" && right.kind === "user" && left.body === right.body && JSON.stringify(left.meta?.images ?? []) === JSON.stringify(right.meta?.images ?? []);
   const append = (item: ChatItem | null) => {
-    if (!item || (!item.body && !item.title && !item.meta)) return;
+    if (!item || (item.kind === "reasoning" && !item.body.trim()) || (!item.body && !item.title && !item.meta)) return;
     if (item.kind === "user" && !item.key.includes("local-")) {
       const pending = optimistic.findIndex((opt) => !consumedOptimisticKeys.has(opt.key) && matchesOptimistic(opt, item));
       if (pending >= 0) consumedOptimisticKeys.add(optimistic[pending].key);
@@ -77,7 +76,18 @@ export function buildChatItems(thread: any, events: UiEvent[], optimistic: ChatI
     for (const item of turn.items ?? []) append(presentThreadItem(item, turn.id));
     if (turn.status === "failed") append({ key: `turn-error:${turn.id}`, kind: "error", title: "Turn failed", body: turn.error?.message ?? "The turn failed." });
   }
-  for (const event of events) append(eventItem(event));
+  const summaryParts = new Map<string | number, string[]>();
+  for (const event of events) {
+    if (event.method === "item/reasoning/summaryTextDelta") {
+      const params = event.params ?? {};
+      const itemId = params.itemId ?? event.sequence;
+      const parts = summaryParts.get(itemId) ?? [];
+      const index = params.summaryIndex ?? 0;
+      parts[index] = (parts[index] ?? "") + (params.delta ?? "");
+      summaryParts.set(itemId, parts);
+      append({ key: `item:${itemId}`, kind: "reasoning", title: "Reasoning summary", body: parts.join("\n") });
+    } else append(eventItem(event));
+  }
   // The app-server replays history as events while `thread/resume` can return
   // an empty turns array. Keep local sends after that replay; inserting them
   // into `thread.turns` would place them before an already-persisted reply.

@@ -15,6 +15,27 @@ describe("buildChatItems", () => {
     ]);
   });
 
+  it("hides reasoning items when the server supplies no summary", () => {
+    const item = { id: "r1", type: "reasoning", summary: [], content: ["internal text"] };
+    expect(buildChatItems({ turns: [{ id: "t1", items: [item] }] }, [])).toEqual([]);
+    expect(buildChatItems(null, [{ sequence: 1, method: "item/started", params: { item } }] as any)).toEqual([]);
+  });
+
+  it("streams summary parts into one reasoning item without raw reasoning text", () => {
+    const events: any[] = [
+      { sequence: 1, method: "item/started", params: { item: { id: "r1", type: "reasoning", summary: [] } } },
+      { sequence: 2, method: "item/reasoning/textDelta", params: { itemId: "r1", contentIndex: 0, delta: "internal text" } },
+      { sequence: 3, method: "item/reasoning/summaryTextDelta", params: { itemId: "r1", summaryIndex: 0, delta: "Checking " } },
+      { sequence: 4, method: "item/reasoning/summaryTextDelta", params: { itemId: "r1", summaryIndex: 0, delta: "the UI" } },
+      { sequence: 5, method: "item/reasoning/summaryPartAdded", params: { itemId: "r1", summaryIndex: 1 } },
+      { sequence: 6, method: "item/reasoning/summaryTextDelta", params: { itemId: "r1", summaryIndex: 1, delta: "Found the cause" } }
+    ];
+    expect(buildChatItems(null, events)).toEqual([{ key: "item:r1", kind: "reasoning", title: "Reasoning summary", body: "Checking the UI\nFound the cause" }]);
+    events.push({ sequence: 7, method: "item/completed", params: { item: { id: "r1", type: "reasoning", summary: ["Checking the UI", "Found the cause"] } } });
+    expect(buildChatItems(null, events)).toHaveLength(1);
+    expect(buildChatItems(null, events)[0].body).toBe("Checking the UI\nFound the cause");
+  });
+
   it("coalesces streaming assistant deltas", () => {
     const events: any[] = [
       { sequence: 1, method: "item/agentMessage/delta", params: { itemId: "a1", delta: "Hello " } },
