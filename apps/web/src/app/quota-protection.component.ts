@@ -10,10 +10,12 @@ import { QuotaProtectionService } from './quota-protection.service';
         <h2>Quota protection</h2>
         <p>Pause sessions started here when the 5-hour quota reaches your reserve. Continue automatically once quota rises above it, even with this browser closed. External CLI sessions are unaffected.</p>
         <label class="setting-row"><span><b>5-hour quota reserve (%)</b><small>Default: 30%. Changes apply to all sessions started here.</small></span>
-          <input type="number" min="1" max="99" step="1" aria-label="5-hour quota reserve (%)" [ngModel]="draft() ?? protection.status()?.reservePercent ?? 30" (ngModelChange)="draft.set($event);saved.set(false)" [disabled]="!protection.status() || protection.saving()">
+          <input type="number" min="1" max="99" step="1" aria-label="5-hour quota reserve (%)" [ngModel]="draft() ?? protection.status()?.reservePercent ?? 30" (ngModelChange)="draft.set($event);saved.set(false)" (blur)="save()" [disabled]="!protection.status() || protection.saving()">
         </label>
-        <div class="actions"><small>Checked every 30 seconds and on quota updates. Remaining: {{protection.status()?.remainingPercent == null ? 'unavailable' : protection.status()!.remainingPercent + '%'}}</small><button type="button" (click)="save()" [disabled]="!valid() || !protection.status() || protection.saving()" aria-label="Save quota reserve">{{protection.saving() ? 'Saving…' : 'Save'}}</button></div>
+        <div class="actions"><small>Checked every 30 seconds and on quota updates. Remaining: {{protection.status()?.remainingPercent == null ? 'unavailable' : protection.status()!.remainingPercent + '%'}}</small></div>
+        @if(protection.saving()){<p role="status">Saving…</p>}
         @if(saved()){<p role="status">Quota reserve saved.</p>}
+        @if(draft() !== null && !valid()){<p role="alert">Enter a whole percentage between 1 and 99.</p>}
         @if(protection.status()?.error){<p role="status">{{protection.status()!.error}}</p>}
         @for(work of protection.status()?.paused ?? []; track work.threadId) {
           <div class="paused"><div><b>Waiting for quota</b><small>Session {{work.threadId}} · {{work.state === 'starting' ? 'Confirming turn start…' : work.state === 'interrupting' ? 'Stopping current turn…' : 'Will continue automatically'}}</small></div><button type="button" (click)="protection.cancel(work.threadId)" [disabled]="protection.saving()">Cancel auto-continue</button></div>
@@ -38,7 +40,9 @@ export class QuotaProtectionComponent {
   readonly valid = computed(() => { const value = this.draft() ?? this.protection.status()?.reservePercent ?? 30; return Number.isInteger(value) && value >= 1 && value <= 99; });
   readonly selectedPaused = computed(() => this.protection.status()?.paused.find(work => work.threadId === this.threadId()));
   async save(): Promise<void> {
-    this.saved.set(await this.protection.save(this.draft() ?? this.protection.status()?.reservePercent ?? 30));
+    const value = this.draft();
+    if (value === null || !this.valid() || !this.protection.status() || this.protection.saving() || value === this.protection.status()!.reservePercent) return;
+    this.saved.set(await this.protection.save(value));
     if (this.saved()) this.draft.set(null);
   }
 }
