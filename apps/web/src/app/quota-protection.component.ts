@@ -4,6 +4,7 @@ import { QuotaProtectionService } from './quota-protection.service';
 
 @Component({
   selector: 'codex-quota-protection', standalone: true, imports: [FormsModule],
+  host: { '[class.quota-settings]': 'settings()' },
   template: `
     @if(settings()) {
       <section class="settings-section">
@@ -28,7 +29,7 @@ import { QuotaProtectionService } from './quota-protection.service';
     }
   `,
   styles: [`
-    :host{display:contents}p,small{color:var(--muted);font-size:12px;line-height:1.6}p{margin:10px 0}small{display:block}input{width:80px;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:inherit;font:inherit}button{padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface2);color:inherit;font:inherit;font-size:12px;min-height:38px}button:disabled{opacity:.5;cursor:default}.actions,.paused{display:flex;align-items:center;justify-content:space-between;gap:12px}.paused{padding:12px;margin:8px 0;border:1px solid #f1b86455;border-radius:10px;background:var(--surface);color:#f1b864;font-size:12px}.paused>div{min-width:0;overflow-wrap:anywhere}.paused button{flex-shrink:0}.actions{margin-top:12px}@media(max-width:540px){.paused{align-items:flex-start;flex-direction:column}}
+    :host{display:contents}:host(.quota-settings){display:block;width:100%}p,small{color:var(--muted);font-size:12px;line-height:1.6}p{margin:10px 0}small{display:block}input{width:80px;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:inherit;font:inherit}button{padding:9px 12px;border:1px solid var(--line);border-radius:9px;background:var(--surface2);color:inherit;font:inherit;font-size:12px;min-height:38px}button:disabled{opacity:.5;cursor:default}.actions,.paused{display:flex;align-items:center;justify-content:space-between;gap:12px}.paused{padding:12px;margin:8px 0;border:1px solid #f1b86455;border-radius:10px;background:var(--surface);color:#f1b864;font-size:12px}.paused>div{min-width:0;overflow-wrap:anywhere}.paused button{flex-shrink:0}.actions{margin-top:12px}@media(max-width:540px){.paused{align-items:flex-start;flex-direction:column}}
   `]
 })
 export class QuotaProtectionComponent {
