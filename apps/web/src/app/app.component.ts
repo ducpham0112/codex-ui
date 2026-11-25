@@ -1,3 +1,4 @@
+import { ApprovalPreference, type ApprovalChoice } from "./approval-preference";
 import { AfterViewInit, Component, ElementRef, HostListener, OnDestroy, OnInit, ViewChild, computed, effect, inject, signal } from "@angular/core";
 import { FormsModule } from "@angular/forms";
 import { CommonModule } from "@angular/common";
@@ -86,6 +87,8 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   readonly sending = signal(false);
   readonly error = signal("");
   readonly effort = signal(localStorage.getItem("codex.effort") ?? "medium");
+  readonly approvalPreference = new ApprovalPreference(localStorage);
+  private draftApproval: ApprovalChoice | undefined;
   readonly execution = signal(localStorage.getItem("codex.execution") ?? "safe");
   readonly dismissedApprovalKey = signal<string | null>(null);
   readonly authDialogDismissed = signal(false);
@@ -571,13 +574,16 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
   async newThread(modelPair?: ModelPairOption): Promise<any | undefined> {
     const project = this.selectedProject(); if (!project) { this.error.set("Select a project before creating a new session."); return; }
     if (!this.connection.canSend()) { this.error.set("Backend is disconnected"); return; }
+    const approval = this.selectedThread() ? this.approvalPreference.forNewSession() : this.approvalChoice();
     try {
-      const result = await this.connection.rpc("thread/start", { cwd: project.root, ...this.threadDefaults(project), ...this.modelPairOverrides(modelPair) });
+      const result = await this.connection.rpc("thread/start", { cwd: project.root, ...this.threadDefaults(project, approval), ...this.modelPairOverrides(modelPair) });
       // Codex 0.147 can return an empty thread before it has a rollout file. A
       // metadata write materialises it without inventing a user/assistant turn,
       // so refreshes and app-server restarts can safely resume the new session.
       const persisted = await this.connection.rpc("thread/metadata/update", { threadId: result.thread.id, gitInfo: { branch: null } });
       const thread = persisted?.thread ?? result.thread;
+      this.approvalPreference.select(thread.id, approval);
+      this.draftApproval = undefined;
       this.threads.update((items) => sortThreads([thread, ...items])); await this.selectThread(thread, { ...result, thread }); return thread;
     }
     catch (error) { this.showError(error); }
@@ -617,8 +623,10 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
       this.projectDialogOpen.set(false); this.projectName.set("");
       this.selectProject(project.id);
       this.loadingProjectId = project.id;
-      const started = await this.connection.rpc("thread/start", { cwd: project.root, ...this.threadDefaults(project) });
+      const approval = this.approvalPreference.forNewSession();
+      const started = await this.connection.rpc("thread/start", { cwd: project.root, ...this.threadDefaults(project, approval) });
       thread = started.thread;
+      this.approvalPreference.select(thread.id, approval);
       this.threads.set([thread]);
       this.loadedProjectId = project.id;
       await this.selectThread(thread, started);
@@ -786,7 +794,9 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
     localStorage.setItem("codex.projectLastUsed", JSON.stringify(updated));
   }
   private firstPrompt(thread: any) { for (const turn of thread?.turns ?? []) for (const item of turn.items ?? []) if (item.type === "userMessage") return item.content?.find((part: any) => part.type === "text")?.text; return ""; }
-  private threadDefaults(project: any) { return { approvalPolicy: project.defaults?.approvalPolicy, model: project.defaults?.model }; }
+  private threadDefaults(project: any, approval: ApprovalChoice) {
+    return { approvalPolicy: approval === "never" ? "never" : project.defaults?.approvalPolicy, model: project.defaults?.model };
+  }
   private modelPairOverrides(pair?: ModelPairOption) { return pair ? { model: pair.model, modelProvider: pair.modelProvider } : {}; }
   private modelPair(model: string, modelProvider: string, label = `${model} · ${modelProvider}`): ModelPairOption { return { key: modelPairKey(model, modelProvider), label, model, modelProvider }; }
   private acceptThreadRuntime(result: any) {
@@ -870,8 +880,19 @@ export class AppComponent implements AfterViewInit, OnInit, OnDestroy {
     } while (cursor);
     return models;
   }
+  approvalChoice(): ApprovalChoice {
+    const threadId = this.selectedThread()?.id;
+    return threadId ? this.approvalPreference.forSession(threadId) : this.draftApproval ?? this.approvalPreference.forNewSession();
+  }
+
+  selectApproval(choice: ApprovalChoice): void {
+    const threadId = this.selectedThread()?.id;
+    if (threadId) this.approvalPreference.select(threadId, choice);
+    else this.draftApproval = choice;
+  }
+
   private executionOverrides() {
-    const approvalPolicy = this.selectedProject()?.defaults?.approvalPolicy ?? "on-request";
+    const approvalPolicy = this.approvalChoice() === "never" ? "never" : this.selectedProject()?.defaults?.approvalPolicy ?? "on-request";
     if (this.execution() === "safe") return { approvalPolicy, sandboxPolicy: { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
     if (this.execution() === "unrestricted") return { approvalPolicy, sandboxPolicy: { type: "dangerFullAccess" } };
     return { approvalPolicy, sandboxPolicy: { type: "workspaceWrite", writableRoots: [], networkAccess: true, excludeTmpdirEnvVar: false, excludeSlashTmp: false } };
